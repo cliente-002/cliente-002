@@ -460,6 +460,121 @@ if (cobroProductosSelect) {
 }
 
 // -----------------------
+// SUELTOS EN COBRAR
+// -----------------------
+const cobroSueltosSelect = document.getElementById("cobro-sueltos");
+const inputKgSueltoCobro = document.getElementById("input-kg-suelto");
+const inputCodigoSueltoCobro = document.getElementById("cobro-codigo-suelto");
+const btnAddSuelto = document.getElementById("btn-add-suelto");
+const btnIncrKgCobro = document.getElementById("btn-incr-kg");
+const btnDecrKgCobro = document.getElementById("btn-decr-kg");
+
+// Actualizar select de sueltos en tiempo real
+if (cobroSueltosSelect) {
+  window.onValue(window.ref(window.db, "sueltos"), snap => {
+    if (!snap.exists()) return;
+    const data = snap.val();
+    cobroSueltosSelect.innerHTML = '<option value="">Elija un Item (Sueltos)</option>';
+    Object.entries(data).forEach(([codigo, prod]) => {
+      if (Number(prod.kg) > 0) {
+        cobroSueltosSelect.innerHTML += `<option value="${codigo}">${escapeHtml(prod.nombre || codigo)}</option>`;
+      }
+    });
+  });
+}
+
+// Ajustar valor del input sin superar stock
+async function ajustarKgInput(codigo, incremento) {
+  if (!codigo) return;
+  const snap = await window.get(window.ref(window.db, `sueltos/${codigo}`));
+  if (!snap.exists()) return alert("Producto suelto no encontrado");
+
+  const prod = snap.val();
+  let val = Number(inputKgSueltoCobro.value) + incremento;
+
+  if (val > Number(prod.kg)) {
+    val = Number(prod.kg);
+    if (incremento > 0) alert(`Stock insuficiente: solo hay ${prod.kg.toFixed(3)} kg de ${prod.nombre}`);
+  }
+  if (val < 0) val = 0;
+
+  inputKgSueltoCobro.value = val.toFixed(3);
+}
+
+// Incrementar / decrementar KG
+btnIncrKgCobro.onclick = async () => {
+  const codigo = cobroSueltosSelect.value || inputCodigoSueltoCobro.value;
+  await ajustarKgInput(codigo, 0.1);
+};
+
+btnDecrKgCobro.onclick = async () => {
+  const codigo = cobroSueltosSelect.value || inputCodigoSueltoCobro.value;
+  await ajustarKgInput(codigo, -0.1);
+};
+
+// Agregar suelto al carrito con validación estricta de stock
+async function agregarSueltoCarrito(codigo) {
+  codigo = (codigo || "").trim();
+  if (!codigo) return;
+
+  const snap = await window.get(window.ref(window.db, `sueltos/${codigo}`));
+  if (!snap.exists()) return alert("Producto suelto no encontrado");
+
+  const prod = snap.val();
+  let kg = safeNumber(inputKgSueltoCobro.value);
+
+  if (kg <= 0) return alert(`Ingrese cantidad válida de ${prod.nombre}`);
+  if (kg > Number(prod.kg)) {
+    alert(`Stock insuficiente: solo hay ${Number(prod.kg).toFixed(3)} kg de ${prod.nombre}`);
+    inputKgSueltoCobro.value = Number(prod.kg).toFixed(3);
+    return;
+  }
+
+  const precioNumber = (typeof prod.precio === "number")
+    ? prod.precio
+    : Number(String(prod.precio).replace(",", "."));
+
+  const idx = carrito.findIndex(it => it.codigo === codigo && it.tipo === "suelto");
+  if (idx >= 0) {
+    let suma = carrito[idx].cantidad + kg;
+    if (suma > Number(prod.kg)) {
+      alert(`Stock insuficiente: solo hay ${Number(prod.kg).toFixed(3)} kg de ${prod.nombre}`);
+      carrito[idx].cantidad = Number(prod.kg);
+    } else {
+      carrito[idx].cantidad += kg;
+    }
+  } else {
+    carrito.push({
+      codigo,
+      nombre: prod.nombre || "SIN NOMBRE",
+      precio: Number(precioNumber) || 0,
+      cantidad: kg,
+      tipo: "suelto"
+    });
+  }
+
+  renderCarrito();
+}
+
+// Enter en input código suelto
+inputCodigoSueltoCobro.addEventListener("keydown", async (e) => {
+  if (e.key !== "Enter") return;
+  await agregarSueltoCarrito(inputCodigoSueltoCobro.value);
+  inputCodigoSueltoCobro.value = "";
+  inputKgSueltoCobro.value = "0.000";
+});
+
+// Click en botón OK suelto
+btnAddSuelto.addEventListener("click", async () => {
+  let codigo = cobroSueltosSelect.value || inputCodigoSueltoCobro.value;
+  if (!codigo) return alert("Seleccione un suelto o ingrese un código");
+  await agregarSueltoCarrito(codigo);
+  inputCodigoSueltoCobro.value = "";
+  cobroSueltosSelect.value = "";
+  inputKgSueltoCobro.value = "0.000";
+});
+  
+// -----------------------
 // COBRAR Y FINALIZAR
 // -----------------------
 
@@ -514,6 +629,19 @@ async function finalizarCobro(tipoPago) {
       cantidad: it.cantidad
     }))
   };
+
+  // Actualizar stock de sueltos
+for (let it of carrito) {
+  if (it.tipo === "suelto") {
+    const refSuelto = window.ref(window.db, `sueltos/${it.codigo}`);
+    const snap = await window.get(refSuelto);
+    if (snap.exists()) {
+      const prod = snap.val();
+      let nuevoKg = Math.max(0, Number(prod.kg) - Number(it.cantidad)); // no bajar de 0.1 ha sido desactivado
+      await window.update(refSuelto, { kg: Number(nuevoKg.toFixed(3)), fecha: ahoraISO() });
+    }
+  }
+}
 
   // Guardar en movimientos
   await window.set(window.ref(window.db, `movimientos/${movId}`), mov);
@@ -690,6 +818,182 @@ function editarStockModal(codigo) {
   })();
 }
 
+// -----------------------
+// SUELTOS
+// -----------------------
+const tablaSueltosBody = document.querySelector("#tabla-sueltos tbody");
+const inputSueltoCodigo = document.getElementById("sueltos-codigo");
+const inputKgSuelto = document.getElementById("sueltos-kg");
+const btnAgregarSuelto = document.getElementById("btn-agregar-suelto");
+const btnBuscarSuelto = document.getElementById("btn-buscar-suelto");
+const btnIncrKg = document.getElementById("sueltos-btn-incr");
+const btnDecrKg = document.getElementById("sueltos-btn-decr");
+
+// Escuchar cambios en sueltos y renderizar tabla
+window.onValue(window.ref(window.db, "sueltos"), snap => {
+  if (!tablaSueltosBody) return;
+  tablaSueltosBody.innerHTML = "";
+  if (!snap.exists()) return;
+
+  const data = snap.val();
+  const ordenados = Object.entries(data).sort(([, a], [, b]) => {
+    const ta = a.fecha ? new Date(a.fecha).getTime() : 0;
+    const tb = b.fecha ? new Date(b.fecha).getTime() : 0;
+    return tb - ta;
+  });
+
+  ordenados.forEach(([codigo, prod]) => {
+    const kgDisplay = Number(prod.kg || 0).toFixed(3);
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(codigo)}</td>
+      <td>${escapeHtml(prod.nombre || "")}</td>
+      <td>
+        <input type="text" class="input-kg" data-id="${codigo}" value="${kgDisplay}" readonly>
+      </td>
+      <td>${prod.fecha ? formatoFechaIsoToDisplay(prod.fecha) : ""}</td>
+      <td>${typeof prod.precio === "number" ? formatoPrecioParaPantalla(prod.precio) : ('$' + String(prod.precio || "").replace('.',','))}</td>
+      <td>
+        <button class="btn-edit-suelto" data-id="${codigo}">✏️</button>
+        <button class="btn-del-suelto" data-id="${codigo}">❌</button>
+      </td>
+    `;
+    tablaSueltosBody.appendChild(tr);
+  });
+
+  // Botones eliminar
+  document.querySelectorAll(".btn-del-suelto").forEach(btn => {
+    btn.onclick = () => requireAdminConfirm(async () => {
+      await window.remove(window.ref(window.db, `sueltos/${btn.dataset.id}`));
+    });
+  });
+
+  // Botones editar
+  document.querySelectorAll(".btn-edit-suelto").forEach(btn => {
+    btn.onclick = () => requireAdminConfirm(() => editarSueltoModal(btn.dataset.id));
+  });
+});
+
+// === Botón agregar o sumar suelto ===
+btnAgregarSuelto.onclick = async () => {
+  const codigo = (inputSueltoCodigo.value || "").trim();
+  if (!codigo) return alert("Ingrese código");
+
+  const refProd = window.ref(window.db, `sueltos/${codigo}`);
+  const snap = await window.get(refProd);
+
+  let kgVal = Number(inputKgSuelto.value);
+  if (kgVal < 0) kgVal = 0;
+  if (kgVal > 99.9) kgVal = 99.9;
+
+  if (snap.exists()) {
+    // Sumar KG al producto existente
+    const prod = snap.val();
+    const nuevoKg = Math.min(99.9, Number(prod.kg || 0) + kgVal);
+    await window.update(refProd, { kg: Number(nuevoKg.toFixed(3)), fecha: ahoraISO() });
+  } else {
+    // Crear producto nuevo
+    await window.set(refProd, {
+      nombre: "PRODUCTO NUEVO",
+      precio: "00000,00",
+      kg: Number(kgVal.toFixed(3)),
+      fecha: ahoraISO()
+    });
+  }
+
+  inputSueltoCodigo.value = "";
+  inputKgSuelto.value = "0.000";
+};
+
+// === Botones fila de + / - KG (para el input de nuevo suelto) ===
+btnIncrKg.onclick = () => {
+  let val = Number(inputKgSuelto.value);
+  inputKgSuelto.value = Math.min(99.9, val + 0.1).toFixed(3);
+};
+
+btnDecrKg.onclick = () => {
+  let val = Number(inputKgSuelto.value);
+  inputKgSuelto.value = Math.max(0, val - 0.1).toFixed(3);
+};
+
+// === Botón BUSCAR SUELTOS ===
+btnBuscarSuelto.onclick = async () => {
+  const termino = (inputSueltoCodigo.value || "").trim().toLowerCase();
+  if (!termino) return alert("Ingrese código o nombre a buscar");
+
+  const snap = await window.get(window.ref(window.db, "sueltos"));
+  if (!snap.exists()) return alert("No hay productos cargados");
+
+  const data = snap.val();
+  const resultados = Object.entries(data).filter(([codigo, prod]) => {
+    return codigo.toLowerCase().includes(termino) || (prod.nombre || "").toLowerCase().includes(termino);
+  });
+
+  if (resultados.length === 0) return alert("No se encontraron productos");
+
+  tablaSueltosBody.innerHTML = "";
+  resultados.forEach(([codigo, prod]) => {
+    const kgDisplay = Number(prod.kg || 0).toFixed(3);
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(codigo)}</td>
+      <td>${escapeHtml(prod.nombre || "")}</td>
+      <td>
+        <input type="text" class="input-kg" data-id="${codigo}" value="${kgDisplay}" readonly>
+      </td>
+      <td>${prod.fecha ? formatoFechaIsoToDisplay(prod.fecha) : ""}</td>
+      <td>${typeof prod.precio === "number" ? formatoPrecioParaPantalla(prod.precio) : ('$' + String(prod.precio || "").replace('.',','))}</td>
+      <td>
+        <button class="btn-edit-suelto" data-id="${codigo}">✏️</button>
+        <button class="btn-del-suelto" data-id="${codigo}">❌</button>
+      </td>
+    `;
+    tablaSueltosBody.appendChild(tr);
+  });
+};
+
+// === Función para editar SUELTO ===
+function editarSueltoModal(codigo) {
+  (async () => {
+    const snap = await window.get(window.ref(window.db, `sueltos/${codigo}`));
+    if (!snap.exists()) return alert("Producto no encontrado");
+    const prod = snap.val();
+
+    mostrarModal(`
+      <h3>Editar Producto</h3>
+      <label>Nombre</label><input id="__edit_suelto_nombre" value="${escapeHtml(prod.nombre || "")}">
+      <label>Precio (00000,00)</label><input id="__edit_suelto_precio" value="${escapeHtml(String(prod.precio || "00000,00"))}">
+      <label>KG</label><input id="__edit_suelto_kg" type="text" value="${Number(prod.kg || 0).toFixed(3)}">
+      <div style="margin-top:10px">
+        <button id="__save_suelto">✅Guardar</button>
+        <button id="__cancel_suelto">❌Cancelar</button>
+      </div>
+    `);
+
+    document.getElementById("__cancel_suelto").onclick = cerrarModal;
+    document.getElementById("__save_suelto").onclick = async () => {
+      const nombre = (document.getElementById("__edit_suelto_nombre").value || "").trim();
+      const precio = (document.getElementById("__edit_suelto_precio").value || "").trim();
+      let kgVal = safeNumber(document.getElementById("__edit_suelto_kg").value.replace(",", "."));
+      if (kgVal < 0) kgVal = 0;
+      if (kgVal > 99.9) kgVal = 99.9;
+
+      if (!/^\d{1,5},\d{2}$/.test(precio)) {
+        alert("Precio inválido. Formato: 00000,00");
+        return;
+      }
+
+      await window.update(window.ref(window.db, `sueltos/${codigo}`), {
+        nombre: nombre || "PRODUCTO NUEVO",
+        precio: precio,
+        kg: Number(kgVal.toFixed(3)),
+        fecha: ahoraISO()
+      });
+      cerrarModal();
+    };
+  })();
+}
+
   // -----------------------
   // CAJEROS
   // -----------------------
@@ -859,34 +1163,58 @@ document.querySelectorAll(".btn-del-mov").forEach(btn => {
 
     const mov = snap.val();
 
-    // 🔥 Restaurar stock antes de eliminar
+    // 🔥 Restaurar stock / sueltos antes de eliminar
     if (mov.items && Array.isArray(mov.items)) {
       for (const item of mov.items) {
-        const stockRef = window.ref(window.db, `stock/${item.codigo}`);
-        const stockSnap = await window.get(stockRef);
 
-        if (stockSnap.exists()) {
-          const prod = stockSnap.val();
-          const nuevaCantidad = (prod.cantidad || 0) + (item.cantidad || 0);
-          await window.update(stockRef, { cantidad: nuevaCantidad });
+        if (item.tipo === "suelto") {
+          // Restaurar suelto
+          const refSuelto = window.ref(window.db, `sueltos/${item.codigo}`);
+          const snapSuelto = await window.get(refSuelto);
+
+          if (snapSuelto.exists()) {
+            const prod = snapSuelto.val();
+            const nuevaCantidad = (prod.kg || 0) + (item.cantidad || 0);
+            await window.update(refSuelto, { kg: nuevaCantidad });
+          } else {
+            // Si no existe, crearlo
+            await window.set(refSuelto, {
+              nombre: item.nombre || "PRODUCTO NUEVO",
+              precio: item.precio || 0,
+              kg: item.cantidad,
+              fecha: new Date().toISOString()
+            });
+          }
+
         } else {
-          // Si no existe en stock, lo re-creamos con lo vendido
-          await window.set(stockRef, {
-            codigo: item.codigo,
-            nombre: item.nombre || "PRODUCTO NUEVO",
-            cantidad: item.cantidad,
-            precio: item.precio || 0,
-            fecha: new Date().toLocaleString()
-          });
+          // Restaurar stock normal
+          const stockRef = window.ref(window.db, `stock/${item.codigo}`);
+          const stockSnap = await window.get(stockRef);
+
+          if (stockSnap.exists()) {
+            const prod = stockSnap.val();
+            const nuevaCantidad = (prod.cantidad || 0) + (item.cantidad || 0);
+            await window.update(stockRef, { cantidad: nuevaCantidad });
+          } else {
+            await window.set(stockRef, {
+              codigo: item.codigo,
+              nombre: item.nombre || "PRODUCTO NUEVO",
+              cantidad: item.cantidad,
+              precio: item.precio || 0,
+              fecha: new Date().toLocaleString()
+            });
+          }
         }
-      }
+
+      } // fin for items
     }
 
     // Ahora sí, eliminar el movimiento
     await window.remove(movRef);
-    console.log(`Movimiento ${btn.dataset.id} eliminado y stock restaurado`);
+    console.log(`Movimiento ${btn.dataset.id} eliminado y stock/sueltos restaurados`);
   });
 });
+
 
     document.querySelectorAll(".btn-ver-mov").forEach(btn => {
       btn.onclick = () => verMovimientoModal(btn.dataset.id);

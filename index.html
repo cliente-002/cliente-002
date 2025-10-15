@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <title>Zona PC V3.0.0</title>
+  <title>Zona PC V3.3.4</title>
   <link rel="stylesheet" href="styles.css">
 
   <!-- Firebase SDK Modular 11.8.1 -->
@@ -13,13 +13,13 @@
 
     // Configuración de Firebase
     const firebaseConfig = {
-  apiKey: "AIzaSyAm7IUHztO3Z1UGJiT5PfZYJkmGsfP9KYQ",
-  authDomain: "cliente-002.firebaseapp.com",
-  databaseURL: "https://cliente-002-default-rtdb.firebaseio.com",
-  projectId: "cliente-002",
-  storageBucket: "cliente-002.firebasestorage.app",
-  messagingSenderId: "145238974713",
-  appId: "1:145238974713:web:d8df479024d6d82b278228"
+  apiKey: "AIzaSyAL_STIsIDz6siydm10x1WtJ0hkgEgVaQM",
+  authDomain: "zonapc-actualizado.firebaseapp.com",
+  databaseURL: "https://zonapc-actualizado-default-rtdb.firebaseio.com",
+  projectId: "zonapc-actualizado",
+  storageBucket: "zonapc-actualizado.firebasestorage.app",
+  messagingSenderId: "837716085875",
+  appId: "1:837716085875:web:198ad1963c42c1105eae06"
     };
 
     // Inicialización
@@ -46,7 +46,7 @@
 <body>
   <header>
     <img src="https://iili.io/KXkB2Ax.png" alt="ZONAPC" class="banner-img">
-    <h1 id="app-title">ZONAPC - Gestión Comercial V3.0.0</h1>
+    <h1 id="app-title">ZONAPC - Gestión Comercial V3.3.4</h1>
     <nav>
       <button class="nav-btn" data-section="cobro">Cobrar</button>
       <button class="nav-btn" data-section="movimientos">Movimientos</button>
@@ -59,7 +59,7 @@
   </header>
 
   <main>
-    <!-- COBRAR -->
+<!-- COBRAR -->
 <section id="cobro">
   <div id="login-modal">
     <h2>👥Cajero(a)👥</h2>
@@ -81,11 +81,14 @@
       <button id="btn-add-product">OK</button>
     </div>
 
-    <!-- FILA SUELTOS (por KG) -->
+    <!-- FILA SUELTOS (KG + Precio) -->
     <div style="display:flex; gap:5px; align-items:center; margin-bottom:5px;">
+      <span>Kg</span>
       <button id="btn-decr-kg" style="width:30px;">-</button>
       <input id="input-kg-suelto" type="text" value="0.100" style="width:60px; text-align:center;">
       <button id="btn-incr-kg" style="width:30px;">+</button>
+      <span>$</span>
+      <input id="input-precio-suelto" type="text" value="000" style="width:70px; text-align:right;" maxlength="5">
 
       <input id="cobro-codigo-suelto" placeholder="Código producto" style="flex:1;">
       <select id="cobro-sueltos" style="flex:2;">
@@ -94,17 +97,17 @@
       <button id="btn-add-suelto">OK</button>
     </div>
 
-    <!-- FILA SUELTOS (por precio) -->
-<div style="display:flex; gap:5px; align-items:center; margin-bottom:5px;">
-  <input id="input-precio-suelto" type="text" value="000" style="width:60px; text-align:right;" maxlength="5">
-  <span>,00</span>
-
-  <input id="cobro-codigo-precio" placeholder="Código producto" style="flex:1;">
-  <select id="cobro-sueltos-precio" style="flex:2;">
-    <option value="">Elija un Item (Sueltos)</option>
-  </select>
-  <button id="btn-add-precio">OK</button>
-</div>
+    <!-- FILA DESCUENTO / RECARGO -->
+    <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px; justify-content:center;">
+      <div style="text-align:center;">
+        <label for="input-descuento" style="display:block; font-size:13px;">Descuento (%)</label>
+        <input id="input-descuento" type="number" min="0" max="100" value="0" style="width:70px; text-align:center; border:1px solid #ccc; border-radius:5px; padding:3px;">
+      </div>
+      <div style="text-align:center;">
+        <label for="input-recargo" style="display:block; font-size:13px;">Recargo (%)</label>
+        <input id="input-recargo" type="number" min="0" max="100" value="0" style="width:70px; text-align:center; border:1px solid #ccc; border-radius:5px; padding:3px;">
+      </div>
+    </div>
 
     <!-- TABLA DE COBRO -->
     <table id="tabla-cobro">
@@ -137,7 +140,7 @@
       <table id="tabla-movimientos">
         <thead>
           <tr>
-            <th>ID</th><th>Total</th><th>Tipo</th><th>Acción</th>
+            <th>ID</th><th>Total</th><th>Tipo</th><th>Cajero</th><th>Hora</th><th>Acción</th>
           </tr>
         </thead>
         <tbody></tbody>

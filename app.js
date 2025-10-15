@@ -88,20 +88,28 @@
     }
   }
 
-  btnLogin.addEventListener("click", async () => {
-    loginMsg.textContent = "";
-    const userId = loginUsuario.value;
-    const password = loginPass.value;
-    const userSnap = await window.get(window.ref(`/cajeros/${userId}`));
-    if (userSnap.exists() && userSnap.val().pass === password) {
-      currentUser = { id: userId, ...userSnap.val() };
-      loginModal.classList.add("hidden");
-      cobroControles.classList.remove("hidden");
-      showSection("cobro");
-    } else {
-      loginMsg.textContent = "Contraseña incorrecta";
+btnLogin.addEventListener("click", async () => {
+  loginMsg.textContent = "";
+  const userId = loginUsuario.value.trim();
+  const password = loginPass.value.trim();
+  const userSnap = await window.get(window.ref(`/cajeros/${userId}`));
+
+  if (userSnap.exists() && userSnap.val().pass === password) {
+    currentUser = { id: userId, ...userSnap.val() };
+
+    // --- Actualizar título visible con nombre del cajero ---
+    const appTitle = document.getElementById("app-title");
+    if (appTitle) {
+      appTitle.textContent = `${currentUser.nombre} (${currentUser.id})`;
     }
-  });
+
+    loginModal.classList.add("hidden");
+    cobroControles.classList.remove("hidden");
+    showSection("cobro");
+  } else {
+    loginMsg.textContent = "Contraseña incorrecta";
+  }
+});
 
 // --- COBRO ---
 const cobroProductos = document.getElementById("cobro-productos");
@@ -117,12 +125,17 @@ const btnKgMenos = document.getElementById("btn-decr-kg");
 const tablaCobro = document.getElementById("tabla-cobro").querySelector("tbody");
 const totalDiv = document.getElementById("total-div");
 const btnCobrar = document.getElementById("btn-cobrar");
-const cobroSueltosPrecio = document.getElementById("cobro-sueltos-precio");
-const inputCodigoPrecio = document.getElementById("cobro-codigo-precio");
 const inputPrecioSuelto = document.getElementById("input-precio-suelto");
-const btnAddPrecio = document.getElementById("btn-add-precio");
+const inputCodigoPrecio = document.getElementById("cobro-codigo-precio");
+const cobroSueltosPrecio = document.getElementById("cobro-sueltos-precio");
+
+// nuevos inputs
+const inputDescuento = document.getElementById("input-descuento");
+const inputRecargo = document.getElementById("input-recargo");
 
 let carrito = [];
+let porcentajeFinal = 0;
+let precioUnitarioActual = 0; // para actualizar KG <-> Precio
 
 // --- Funciones de carga ---
 async function loadProductos() {
@@ -159,27 +172,23 @@ async function loadProductos() {
   inputPrecioSuelto.value = "000";
 }
 
-async function loadSueltosPrecio() {
-  const sueltosSnap = await window.get(window.ref("/sueltos"));
-  cobroSueltosPrecio.innerHTML = '<option value="">Elija un Item (Sueltos)</option>';
-  if (sueltosSnap.exists()) {
-    Object.entries(sueltosSnap.val()).forEach(([k, v]) => {
-      const opt = document.createElement("option");
-      opt.value = k;
-      opt.textContent = v.nombre;
-      cobroSueltosPrecio.appendChild(opt);
-    });
-  }
-  inputCodigoPrecio.value = "";
-  inputPrecioSuelto.value = "000";
-}
-
 // --- Inicialización ---
 async function inicializarCobro() {
   await loadProductos();
-  await loadSueltosPrecio();
 }
 inicializarCobro();
+
+// --- Calcular porcentaje final ---
+function calcularPorcentajeFinal() {
+  const desc = Math.min(Math.max(Number(inputDescuento.value) || 0, 0), 100);
+  const rec = Math.min(Math.max(Number(inputRecargo.value) || 0, 0), 100);
+
+  inputDescuento.value = String(Math.round(desc));
+  inputRecargo.value = String(Math.round(rec));
+
+  porcentajeFinal = rec - desc;
+  actualizarTabla();
+}
 
 // --- Tabla de cobro ---
 function actualizarTabla() {
@@ -201,9 +210,18 @@ function actualizarTabla() {
     tablaCobro.appendChild(tr);
     total += item.cant * item.precio;
   });
-  totalDiv.textContent = `TOTAL: $${total.toFixed(2)}`;
+
+  const totalModificado = total * (1 + porcentajeFinal / 100);
+  const signo = porcentajeFinal > 0 ? "+" : porcentajeFinal < 0 ? "-" : "";
+  const porcentajeTexto = porcentajeFinal !== 0 ? ` <small>(${signo}${Math.abs(porcentajeFinal)}%)</small>` : "";
+  totalDiv.innerHTML = `TOTAL: <span style="color:red; font-weight:bold;">$${totalModificado.toFixed(2)}</span>${porcentajeTexto}`;
+
   btnCobrar.classList.toggle("hidden", carrito.length === 0);
 }
+
+// --- Escuchar cambios en descuento / recargo ---
+if (inputDescuento) inputDescuento.addEventListener("input", calcularPorcentajeFinal);
+if (inputRecargo) inputRecargo.addEventListener("input", calcularPorcentajeFinal);
 
 // --- Carrito ---
 async function agregarAlCarrito(nuevoItem) {
@@ -241,85 +259,181 @@ btnAddProduct.addEventListener("click", async () => {
   inputCodigoProducto.value = "";
 });
 
+// --- SUELTOS UNIFICADOS KG <-> PRECIO ---
+async function actualizarPrecioUnitario() {
+  let id = cobroSueltos.value || inputCodigoSuelto.value.trim();
+  if (!id) return;
+  const snap = await window.get(window.ref(`/sueltos/${id}`));
+  if (!snap.exists()) return;
+  precioUnitarioActual = snap.val().precio;
+
+  // actualizar precio segun KG actual
+  inputPrecioSuelto.value = (parseFloat(inputKgSuelto.value) * precioUnitarioActual).toFixed(2);
+}
+
+async function actualizarKgSegunPrecio() {
+  if (!precioUnitarioActual) return;
+  let precio = parseFloat(inputPrecioSuelto.value) || 0;
+  inputKgSuelto.value = (precio / precioUnitarioActual).toFixed(3);
+}
+
+// --- NUEVO FORMATEO KG FANTÁSTICO ---
+const msgKgCobro = document.createElement("p");
+msgKgCobro.style.color = "red";
+msgKgCobro.style.margin = "4px 0 0 0";
+msgKgCobro.style.fontSize = "0.9em";
+inputKgSuelto.parentNode.appendChild(msgKgCobro);
+
+// Valor inicial igual que SUELTOS
+inputKgSuelto.value = "0.000";
+
+function formatearKgCobro(inputElement, msgElement, delta = 0) {
+  let raw = inputElement.value.replace(/\D/g, "");
+
+  if (delta !== 0) {
+    let val = parseFloat(inputElement.value) || 0;
+    val = Math.min(99.000, Math.max(0.000, val + delta));
+    inputElement.value = val.toFixed(3);
+    if (msgElement) msgElement.textContent = "";
+    actualizarPrecioUnitario();
+    return;
+  }
+
+  let val;
+  switch (raw.length) {
+    case 0: val = 0.000; break;
+    case 1: val = parseFloat("0.00" + raw); break;
+    case 2: val = parseFloat("0.0" + raw); break;
+    case 3: val = parseFloat("0." + raw); break;
+    case 4: val = parseFloat(raw[0] + "." + raw.slice(1, 4)); break;
+    case 5: val = parseFloat(raw.slice(0, 2) + "." + raw.slice(2, 5)); break;
+    default: val = parseFloat(raw.slice(0, 2) + "." + raw.slice(2, 5)); break;
+  }
+
+  if (isNaN(val) || val < 0.000 || val > 99) {
+    msgElement.textContent = "KG inválido: ejemplo 1.250 kg";
+    inputElement.value = "0.000"; // restablecemos a 0.000 en error
+  } else {
+    inputElement.value = val.toFixed(3);
+    msgElement.textContent = "";
+  }
+
+  actualizarPrecioUnitario();
+}
+
+// --- Botones + / - sueltos con formateo ---
+btnKgMas.addEventListener("click", () => formatearKgCobro(inputKgSuelto, msgKgCobro, 0.100));
+btnKgMenos.addEventListener("click", () => formatearKgCobro(inputKgSuelto, msgKgCobro, -0.100));
+
+// --- Edición manual KG ---
+inputKgSuelto.addEventListener("input", () => formatearKgCobro(inputKgSuelto, msgKgCobro));
+inputKgSuelto.addEventListener("blur", () => formatearKgCobro(inputKgSuelto, msgKgCobro));
+
+// --- Escuchar cambios precio / selección sueltos ---
+inputPrecioSuelto.addEventListener("input", actualizarKgSegunPrecio);
+cobroSueltos.addEventListener("change", actualizarPrecioUnitario);
+inputCodigoSuelto.addEventListener("change", actualizarPrecioUnitario);
+
+// --- Botón agregar suelto unificado ---
 btnAddSuelto.addEventListener("click", async () => {
   let id = cobroSueltos.value || inputCodigoSuelto.value.trim();
-  let cant = parseFloat(inputKgSuelto.value);
-  if (!id || cant <= 0) return;
+  if (!id) return alert("Seleccione un producto suelto");
 
   const snap = await window.get(window.ref(`/sueltos/${id}`));
   if (!snap.exists()) return alert("Producto no encontrado");
   const data = snap.val();
 
+  let cant = parseFloat(inputKgSuelto.value) || 0;
+  if (cant <= 0) return alert("Cantidad inválida");
   if (cant > data.kg) return alert("STOCK INSUFICIENTE");
 
   agregarAlCarrito({ id, nombre: data.nombre, cant, precio: data.precio, tipo: "sueltos" });
+
+  // reset inputs
   inputKgSuelto.value = "0.100";
-  inputCodigoSuelto.value = "";
-});
-
-btnAddPrecio.addEventListener("click", async () => {
-  let id = cobroSueltosPrecio.value || inputCodigoPrecio.value.trim();
-  let precioIngresado = parseInt(inputPrecioSuelto.value);
-  if (!id || precioIngresado <= 0) return;
-
-  const snap = await window.get(window.ref(`/sueltos/${id}`));
-  if (!snap.exists()) return alert("Producto no encontrado");
-  const data = snap.val();
-
-  let cant = parseFloat((precioIngresado / data.precio).toFixed(3));
-  if (cant > data.kg) return alert("STOCK INSUFICIENTE");
-
-  agregarAlCarrito({ id, nombre: data.nombre, cant, precio: data.precio, tipo: "sueltos" });
-
   inputPrecioSuelto.value = "000";
-  inputCodigoPrecio.value = "";
-});
-
-// --- Botones + / - sueltos ---
-btnKgMas.addEventListener("click", () => {
-  inputKgSuelto.value = (parseFloat(inputKgSuelto.value) + 0.100).toFixed(3);
-});
-btnKgMenos.addEventListener("click", () => {
-  let val = parseFloat(inputKgSuelto.value) - 0.100;
-  if (val < 0.100) val = 0.100;
-  inputKgSuelto.value = val.toFixed(3);
+  inputCodigoSuelto.value = "";
 });
 
 // --- IMPRIMIR TICKET ---
 function imprimirTicket(ticketID, fecha, cajeroID, items, total, tipoPago) {
-  const iframe = document.createElement("iframe");
-  iframe.style.position = "absolute";
-  iframe.style.width = "0";
-  iframe.style.height = "0";
-  document.body.appendChild(iframe);
+  const signo = porcentajeFinal > 0 ? "+" : porcentajeFinal < 0 ? "-" : "";
+  const porcentajeTexto = porcentajeFinal !== 0 ? ` (${signo}${Math.abs(porcentajeFinal)}%)` : "";
 
-  const doc = iframe.contentWindow.document;
-  doc.open();
-  doc.write(`
-    <html>
-      <head>
-        <style>
-          body { font-family: monospace; font-size: 13px; max-width: 6cm; white-space: pre-line; margin:0; padding:6px; }
-          .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
-          .bloque { margin-bottom:8px; }
-          .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
-        </style>
-      </head>
-      <body>
-        <div class="titulo">*** VENTA ***</div>
-        <div class="bloque">${fecha}</div>
-        <div class="bloque" style="white-space: pre-line;">
-          ${items.map(it => `${it.nombre} $${it.precio.toFixed(2)} (x${it.cant}) = $${(it.cant*it.precio).toFixed(2)}\n--------------------------------`).join("\n")}
-          \nTOTAL: $${total.toFixed(2)}\nPago en: ${tipoPago}
-        </div>
-        <div class="total">TOTAL: $${total.toFixed(2)}</div>
-      </body>
-    </html>
-  `);
-  doc.close();
-  iframe.contentWindow.focus();
-  iframe.contentWindow.print();
-  setTimeout(() => iframe.remove(), 500);
+  const iframe = document.createElement("iframe");
+iframe.style.position = "absolute";
+iframe.style.width = "0";
+iframe.style.height = "0";
+document.body.appendChild(iframe);
+
+const doc = iframe.contentWindow.document;
+doc.open();
+doc.write(`
+<html>
+  <head>
+    <style>
+      body {
+        font-family: monospace;
+        font-size: 10px;
+        max-width: 5cm;
+        white-space: pre-line;
+        margin: 0;
+        padding: 1px;
+      }
+      .titulo {
+        text-align:center;
+        font-weight:bold;
+        border-bottom:1px dashed #000;
+        margin: 0 0 1px 0;
+        padding: 0 0 1px 0;
+      }
+      .subtitulo {
+        text-align:center;
+        margin: 0 0 1px 0;
+        padding: 0;
+      }
+      .info {
+        font-size:10px;
+        margin: 0 0 1px 0;
+        padding: 0;
+      }
+      .items {
+        font-size:10px;
+        margin: 0 0 2px 0;
+        padding: 0;
+      }
+      .item-line {
+        border-bottom: 1px dotted #000; /* separación sutil entre items */
+        margin: 1px 0;
+        padding: 1px 0;
+      }
+      .total {
+        text-align:center;
+        font-weight:bold;
+        font-size:12px;
+        border-top:1px dashed #000;
+        margin-top:1px;
+        padding-top:1px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="titulo">*** TICKET ***</div>
+    <div class="subtitulo">${ticketID}</div>
+    <div class="info">Fecha: ${fecha}</div>
+    <div class="info">Cajero: ${cajeroID}</div>
+    <div class="info">Pago: ${tipoPago}</div>
+    <div class="items">
+      ${items.map(it => `<div class="item-line">${it.nombre} $${it.precio.toFixed(2)} x${it.cant} = $${(it.precio*it.cant).toFixed(2)}</div>`).join("")}
+    </div>
+    <div class="total">TOTAL: $${total.toFixed(2)}${porcentajeTexto}</div>
+  </body>
+</html>
+`);
+doc.close();
+iframe.contentWindow.focus();
+iframe.contentWindow.print();
+setTimeout(() => iframe.remove(), 500);
 }
 
 // --- COBRAR ---
@@ -346,10 +460,23 @@ btnCobrar.addEventListener("click", async () => {
     </div>
   `;
   document.body.appendChild(modal);
-  document.getElementById("cancelar-pago").addEventListener("click", () => modal.remove());
+
+  const allButtons = modal.querySelectorAll("button");
+
+  // --- Función para deshabilitar todos los botones ---
+  function disableButtons() {
+    allButtons.forEach(btn => btn.disabled = true);
+  }
+
+  document.getElementById("cancelar-pago").addEventListener("click", () => {
+    disableButtons(); // deshabilitar todos al presionar cancelar
+    modal.remove();
+  });
 
   modal.querySelectorAll("button[data-pay]").forEach(btn => {
     btn.addEventListener("click", async () => {
+      disableButtons(); // deshabilitar todos los botones al presionar cualquiera
+
       const tipoPago = btn.dataset.pay;
       const fechaHoy = new Date().toISOString().split("T")[0];
 
@@ -364,47 +491,60 @@ btnCobrar.addEventListener("click", async () => {
 
       const fecha = new Date();
       const fechaStr = `${fecha.getDate().toString().padStart(2,'0')}/${(fecha.getMonth()+1).toString().padStart(2,'0')}/${fecha.getFullYear()} (${fecha.getHours().toString().padStart(2,'0')}:${fecha.getMinutes().toString().padStart(2,'0')})`;
-      const total = carrito.reduce((a,b)=>a+b.cant*b.precio,0);
 
-      // Guardar movimientos
+      // --- total original y con descuento/recargo ---
+      const totalOriginal = carrito.reduce((a, b) => a + b.cant * b.precio, 0);
+      const totalFinal = totalOriginal * (1 + (porcentajeFinal || 0) / 100);
+
+      // --- guardar movimientos ---
       await window.set(window.ref(`/movimientos/${ticketID}`), {
         ticketID,
         cajero: currentUser.id,
         items: carrito,
-        total,
+        total: totalFinal,
         fecha: fecha.toISOString(),
         tipo: tipoPago,
-        eliminado: false
+        eliminado: false,
+        porcentajeAplicado: porcentajeFinal || 0
       });
 
-      // Guardar historial
+      // --- guardar historial ---
       await window.set(window.ref(`/historial/${ticketID}`), {
         ticketID,
         cajero: currentUser.id,
         items: carrito,
-        total,
+        total: totalFinal,
         fecha: fecha.toISOString(),
-        tipo: tipoPago
+        tipo: tipoPago,
+        porcentajeAplicado: porcentajeFinal || 0
       });
 
-      // Actualizar config
-      await window.update(window.ref("/config"), { ultimoTicketID: ultimoID, ultimoTicketFecha: fechaHoy });
+      // --- actualizar config ---
+      await window.update(window.ref("/config"), {
+        ultimoTicketID: ultimoID,
+        ultimoTicketFecha: fechaHoy
+      });
 
-      // Actualizar stock
+      // --- actualizar stock ---
       for (const item of carrito) {
         const snapItem = await window.get(window.ref(`/${item.tipo}/${item.id}`));
         if (snapItem.exists()) {
           const data = snapItem.val();
-          if (item.tipo === "stock") await window.update(window.ref(`/${item.tipo}/${item.id}`), { cant: data.cant - item.cant });
-          else await window.update(window.ref(`/${item.tipo}/${item.id}`), { kg: data.kg - item.cant });
+          if (item.tipo === "stock") {
+            await window.update(window.ref(`/${item.tipo}/${item.id}`), { cant: data.cant - item.cant });
+          } else {
+            await window.update(window.ref(`/${item.tipo}/${item.id}`), { kg: data.kg - item.cant });
+          }
         }
       }
 
-      // Imprimir ticket
-      imprimirTicket(ticketID, fechaStr, currentUser.id, carrito, total, tipoPago);
+      // --- imprimir ticket ---
+      imprimirTicket(ticketID, fechaStr, currentUser.id, carrito, totalOriginal, tipoPago);
 
+      // --- ALERT ---
       alert("VENTA FINALIZADA");
 
+      // --- limpiar ---
       carrito = [];
       actualizarTabla();
       loadStock();
@@ -415,7 +555,6 @@ btnCobrar.addEventListener("click", async () => {
     });
   });
 });
-
 
 // --- MOVIMIENTOS ---
 const tablaMovimientos = document.getElementById("tabla-movimientos").querySelector("tbody");
@@ -436,60 +575,39 @@ async function loadMovimientos() {
     const tr = document.createElement("tr");
     const eliminado = mov.eliminado || false;
 
+    const fechaObj = new Date(mov.fecha);
+    const horaStr = `${fechaObj.getHours().toString().padStart(2,"0")}:${fechaObj.getMinutes().toString().padStart(2,"0")}`;
+
     tr.style.backgroundColor = eliminado ? "#ccc" : "";
     tr.innerHTML = `
       <td>${id}</td>
       <td>${mov.total.toFixed(2)}</td>
       <td>${mov.tipo}</td>
+      <td>${mov.cajero}</td>
+      <td>${horaStr}</td>
       <td>
         <button class="reimprimir" data-id="${id}" ${eliminado ? "disabled" : ""}>🖨</button>
         <button class="eliminar" data-id="${id}" ${eliminado ? "disabled" : ""}>❌</button>
       </td>
     `;
 
-    // --- REIMPRIMIR MOVIMIENTO ---
-    tr.querySelector(".reimprimir").addEventListener("click", () => {
-      const fechaFormateada = `${new Date(mov.fecha).toLocaleDateString()} (${new Date(mov.fecha).getHours().toString().padStart(2,"0")}:${new Date(mov.fecha).getMinutes().toString().padStart(2,"0")})`;
+// --- REIMPRIMIR MOVIMIENTO ---
+tr.querySelector(".reimprimir").addEventListener("click", () => {
+  const fechaObj = new Date(mov.fecha);
+  const fechaStr = `${fechaObj.getDate().toString().padStart(2,'0')}/${(fechaObj.getMonth()+1).toString().padStart(2,'0')}/${fechaObj.getFullYear()}`;
+  const horaStr = `${fechaObj.getHours().toString().padStart(2,'0')}:${fechaObj.getMinutes().toString().padStart(2,'0')}`;
+  const fechaFormateada = `${fechaStr} (${horaStr})`;
 
-      let cuerpo = '';
-      mov.items.forEach(it => {
-        cuerpo += `${it.nombre} $${it.precio.toFixed(2)} (x${it.cant}) = $${(it.precio*it.cant).toFixed(2)}\n--------------------------------\n`;
-      });
-
-      cuerpo += `TOTAL: $${mov.total.toFixed(2)}\n--------------------------------\n`;
-      cuerpo += `VENTA - Cajero: ${mov.cajero}\n--------------------------------\n`;
-
-      const iframe = document.createElement("iframe");
-      iframe.style.position = "absolute";
-      iframe.style.width = "0";
-      iframe.style.height = "0";
-      document.body.appendChild(iframe);
-
-      const doc = iframe.contentWindow.document;
-      doc.open();
-      doc.write(`
-        <html>
-          <head>
-            <style>
-              body { font-family: monospace; font-size:13px; max-width:6cm; white-space:pre-line; margin:0; padding:6px; }
-              .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
-              .bloque { margin-bottom:8px; }
-              .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
-            </style>
-          </head>
-          <body>
-            <div class="titulo">*** VENTA ***</div>
-            <div class="bloque">${fechaFormateada}</div>
-            <div class="bloque" style="white-space: pre-line;">${cuerpo}</div>
-            <div class="total">TOTAL: $${mov.total.toFixed(2)}</div>
-          </body>
-        </html>
-      `);
-      doc.close();
-      iframe.contentWindow.focus();
-      iframe.contentWindow.print();
-      setTimeout(()=>iframe.remove(),500);
-    });
+  // Reutilizamos la función imprimirTicket
+  imprimirTicket(
+    mov.ticketID || "N/A",
+    fechaFormateada,
+    mov.cajero,
+    mov.items,
+    mov.total,
+    mov.tipo
+  );
+});
 
     // --- ELIMINAR MOVIMIENTO ---
     tr.querySelector(".eliminar").addEventListener("click", () => {
@@ -643,79 +761,97 @@ async function loadHistorial() {
 
     tr.innerHTML = `
       <td>${id}</td>
-      <td>${mov.totalGeneral ? mov.totalGeneral.toFixed(2) : mov.total ? mov.total.toFixed(2) : "-"}</td>
-      <td>${mov.tipo}</td>
-      <td>${mov.cajeros ? mov.cajeros.join(", ") : mov.cajero || ""}</td>
-      <td>${new Date(mov.fecha).toLocaleString()}</td>
-      <td>${botones}</td>
+<td>${mov.totalGeneral ? mov.totalGeneral.toFixed(2) : mov.total ? mov.total.toFixed(2) : "-"}</td>
+<td>${mov.tipo}</td>
+<td>${mov.cajeros ? mov.cajeros.join(", ") : mov.cajero || ""}</td>
+<td>${(() => {
+  const fechaObj = new Date(mov.fecha);
+  const dia = fechaObj.getDate().toString().padStart(2, "0");
+  const mes = (fechaObj.getMonth() + 1).toString().padStart(2, "0");
+  const anio = fechaObj.getFullYear();
+  const horas = fechaObj.getHours().toString().padStart(2, "0");
+  const minutos = fechaObj.getMinutes().toString().padStart(2, "0");
+  return `${dia}/${mes}/${anio} (${horas}:${minutos})`;
+})()}</td>
+<td>${botones}</td>
     `;
 
-    // --- REIMPRIMIR DESDE HISTORIAL ---
-    const btnReimprimir = tr.querySelector(".reimprimir");
-    if (btnReimprimir) {
-      btnReimprimir.addEventListener("click", () => {
-        if (mov.tipo === "TIRAR Z") {
-          // --- USAR FORMATO BONITO DE CIERRE Z ---
-          const fechaZ = new Date(mov.fecha);
-          const fechaFormateada = `${fechaZ.toLocaleDateString()} (${fechaZ.getHours().toString().padStart(2,"0")}:${fechaZ.getMinutes().toString().padStart(2,"0")})`;
+// --- REIMPRIMIR DESDE HISTORIAL ---
+const btnReimprimir = tr.querySelector(".reimprimir");
+if (btnReimprimir) {
+  btnReimprimir.addEventListener("click", () => {
+    if (mov.tipo === "TIRAR Z") {
+      // --- FORMATO CIERRE Z ---
+      const fechaZ = new Date(mov.fecha);
+      const fechaFormateada = `${fechaZ.getDate().toString().padStart(2,'0')}/${(fechaZ.getMonth()+1).toString().padStart(2,'0')}/${fechaZ.getFullYear()} (${fechaZ.getHours().toString().padStart(2,"0")}:${fechaZ.getMinutes().toString().padStart(2,"0")})`;
 
-          let cuerpo = '';
-          for (const cajero of mov.cajeros) {
-            cuerpo += `CAJERO: ${cajero}\n--------------------------------\n`;
-            const movCajero = mov.items.filter(i => i.cajero === cajero);
-            const tiposPago = [...new Set(movCajero.map(i => i.tipo))];
-            for (const tipo of tiposPago) {
-              const ventasTipo = movCajero.filter(i => i.tipo === tipo);
-              const subtotal = ventasTipo.reduce((acc, m) => acc + m.total, 0);
-              cuerpo += ` ${tipo.toUpperCase()} — Subtotal: $${subtotal.toFixed(2)}\n`;
-              ventasTipo.forEach(m => {
-                cuerpo += `   ${m.ticketID.slice(-5)}  $${m.total.toFixed(2)}\n`;
-              });
-              cuerpo += `--------------------------------\n`;
-            }
-            cuerpo += `\n`;
-          }
-          cuerpo += `TOTAL GENERAL: $${mov.totalGeneral.toFixed(2)}\n--------------------------------\n`;
-          cuerpo += `CIERRE COMPLETO - ${mov.cajeros.length} CAJEROS\n`;
-          cuerpo += `--------------------------------\nFIN DEL REPORTE Z\n`;
-
-          const iframe = document.createElement("iframe");
-          iframe.style.position = "absolute";
-          iframe.style.width = "0";
-          iframe.style.height = "0";
-          document.body.appendChild(iframe);
-
-          const doc = iframe.contentWindow.document;
-          doc.open();
-          doc.write(`
-            <html>
-              <head>
-                <style>
-                  body { font-family: monospace; font-size:13px; max-width:6cm; white-space:pre-line; margin:0; padding:6px; }
-                  .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
-                  .bloque { margin-bottom:8px; }
-                  .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
-                </style>
-              </head>
-              <body>
-                <div class="titulo">*** CIERRE DE CAJA (Z) ***</div>
-                <div class="bloque">${fechaFormateada}</div>
-                <div class="bloque" style="white-space: pre-line;">${cuerpo}</div>
-                <div class="total">TOTAL: $${mov.totalGeneral.toFixed(2)}</div>
-              </body>
-            </html>
-          `);
-          doc.close();
-          iframe.contentWindow.focus();
-          iframe.contentWindow.print();
-          setTimeout(() => iframe.remove(), 500);
-
-        } else {
-          // Para ventas normales
-          imprimirTicket(mov.ticketID, new Date(mov.fecha).toLocaleString(), mov.cajero, mov.items, mov.total, mov.tipo);
+      let cuerpo = '';
+      for (const cajero of mov.cajeros) {
+        cuerpo += `CAJERO: ${cajero}\n--------------------------------\n`;
+        const movCajero = mov.items.filter(i => i.cajero === cajero);
+        const tiposPago = [...new Set(movCajero.map(i => i.tipo))];
+        for (const tipo of tiposPago) {
+          const ventasTipo = movCajero.filter(i => i.tipo === tipo);
+          const subtotal = ventasTipo.reduce((acc, m) => acc + m.total, 0);
+          cuerpo += ` ${tipo.toUpperCase()} — Subtotal: $${subtotal.toFixed(2)}\n`;
+          ventasTipo.forEach(m => {
+            cuerpo += `   ${m.ticketID.slice(-5)}  $${m.total.toFixed(2)}\n`;
+          });
+          cuerpo += `--------------------------------\n`;
         }
-      });
+        cuerpo += `\n`;
+      }
+      cuerpo += `TOTAL GENERAL: $${mov.totalGeneral.toFixed(2)}\n--------------------------------\n`;
+      cuerpo += `CIERRE COMPLETO - ${mov.cajeros.length} CAJEROS\n`;
+      cuerpo += `--------------------------------\nFIN DEL REPORTE Z\n`;
+
+      const iframe = document.createElement("iframe");
+      iframe.style.position = "absolute";
+      iframe.style.width = "0";
+      iframe.style.height = "0";
+      document.body.appendChild(iframe);
+
+      const doc = iframe.contentWindow.document;
+      doc.open();
+      doc.write(`
+        <html>
+          <head>
+            <style>
+              body { font-family: monospace; font-size:13px; max-width:6cm; white-space:pre-line; margin:0; padding:6px; }
+              .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
+              .bloque { margin-bottom:8px; }
+              .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
+            </style>
+          </head>
+          <body>
+            <div class="titulo">*** CIERRE DE CAJA (Z) ***</div>
+            <div class="bloque">${fechaFormateada}</div>
+            <div class="bloque" style="white-space: pre-line;">${cuerpo}</div>
+            <div class="total">TOTAL: $${mov.totalGeneral.toFixed(2)}</div>
+          </body>
+        </html>
+      `);
+      doc.close();
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();
+      setTimeout(() => iframe.remove(), 500);
+
+    } else {
+      // --- VENTAS NORMALES: unificadas con Cobrar/Movimientos ---
+      const fechaObj = new Date(mov.fecha);
+      const fechaStr = `${fechaObj.getDate().toString().padStart(2,'0')}/${(fechaObj.getMonth()+1).toString().padStart(2,'0')}/${fechaObj.getFullYear()} (${fechaObj.getHours().toString().padStart(2,'0')}:${fechaObj.getMinutes().toString().padStart(2,'0')})`;
+
+      imprimirTicket(
+        mov.ticketID || "N/A",
+        fechaStr,
+        mov.cajero,
+        mov.items,
+        mov.total,
+        mov.tipo
+      );
     }
+  });
+}
 
     // --- ELIMINAR Z ---
     const btnEliminarZ = tr.querySelector(".eliminar-z");

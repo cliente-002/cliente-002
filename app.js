@@ -1,1816 +1,1675 @@
 /*****************************************************
- * app.js (V2.12.2)
- * Funcional: Cobrar, Stock, Cajeros, Movimientos, Config
- * Requiere en index.html: elementos con los IDs usados abajo
- * Requiere helpers de Firebase expuestos en window: ref,get,set,update,remove,onValue
+ * app.js
+ * Lógica completa de Zona PC V3.0.0
+ * Compatible Firebase 11.8.1 modular
  *****************************************************/
 (() => {
-  "use strict";
+  // --- Variables globales ---
+  let currentUser = null;
+  const sections = document.querySelectorAll("main > section");
+  const navButtons = document.querySelectorAll(".nav-btn");
 
-  // Cobrar / Login
+  // --- Helper: mostrar secciones ---
+  function showSection(id) {
+    sections.forEach(s => s.classList.add("hidden"));
+    const sec = document.getElementById(id);
+    if (sec) sec.classList.remove("hidden");
+  }
+
+  navButtons.forEach(btn => btn.addEventListener("click", () => showSection(btn.dataset.section)));
+  showSection("cobro"); // sección por defecto
+
+// --- LOGIN ADMINISTRADOR AL INICIO ---
+(async () => {
+  // Verificar si ya tenemos el token guardado en localStorage
+  const deviceToken = localStorage.getItem("adminDeviceToken");
+  if (deviceToken) return; // ya validado antes, no pedir contraseña
+
+  // Crear modal
+  const adminModal = document.createElement("div");
+  adminModal.id = "admin-modal";
+  adminModal.style.cssText = `
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    display:flex; justify-content:center; align-items:center;
+    background:rgba(0,0,0,0.7); z-index:9999;
+  `;
+  adminModal.innerHTML = `
+    <div style="background:#fff; padding:20px; border-radius:10px; text-align:center;">
+      <h2>🔒 Contraseña de Administrador</h2>
+      <input id="admin-pass-input" type="password" placeholder="Contraseña" style="width:200px; text-align:center;">
+      <p id="admin-pass-msg" style="color:red; margin:5px 0;"></p>
+      <button id="admin-pass-btn">Ingresar</button>
+    </div>
+  `;
+  document.body.appendChild(adminModal);
+
+  const adminPassInput = document.getElementById("admin-pass-input");
+  const adminPassBtn = document.getElementById("admin-pass-btn");
+  const adminPassMsg = document.getElementById("admin-pass-msg");
+
+  async function validarAdmin() {
+    const snap = await window.get(window.ref("/config"));
+    const val = snap.exists() ? snap.val() : {};
+    const passAdmin = val.passAdmin || "1918";
+    const masterPass = val.masterPass || "1409";
+    const entrada = adminPassInput.value.trim();
+    if (entrada === passAdmin || entrada === masterPass) {
+      // Generar un token aleatorio único por dispositivo
+      const token = crypto.randomUUID();
+      localStorage.setItem("adminDeviceToken", token);
+      adminModal.remove();
+    } else {
+      adminPassMsg.textContent = "Contraseña incorrecta";
+    }
+  }
+
+  adminPassBtn.addEventListener("click", validarAdmin);
+  adminPassInput.addEventListener("keyup", e => { if (e.key === "Enter") validarAdmin(); });
+})();
+
+  // --- LOGIN CAJERO ---
+  const loginModal = document.getElementById("login-modal");
   const loginUsuario = document.getElementById("login-usuario");
   const loginPass = document.getElementById("login-pass");
   const btnLogin = document.getElementById("btn-login");
   const loginMsg = document.getElementById("login-msg");
-  const loginModal = document.getElementById("login-modal");
   const cobroControles = document.getElementById("cobro-controles");
-  const cobroCantidadSelect = document.getElementById("cobro-cantidad");
-  const cobroCodigo = document.getElementById("cobro-codigo");
-  const tablaCobroBody = document.querySelector("#tabla-cobro tbody");
-  const totalDiv = document.getElementById("total-div");
-  const btnCobrar = document.getElementById("btn-cobrar");
 
-  // Stock
-  const inputStockCodigo = document.getElementById("stock-codigo");
-  const stockCantidadSelect = document.getElementById("stock-cantidad");
-  const btnAgregarStock = document.getElementById("agregar-stock");
-  const tablaStockBody = document.querySelector("#tabla-stock tbody");
-
-  // Cajeros
-  const cajeroNroSelect = document.getElementById("cajero-nro");
-  const inputCajeroNombre = document.getElementById("cajero-nombre");
-  const inputCajeroDni = document.getElementById("cajero-dni");
-  const inputCajeroPass = document.getElementById("cajero-pass");
-  const btnAgregarCajero = document.getElementById("agregar-cajero");
-  const tablaCajerosBody = document.querySelector("#tabla-cajeros tbody");
-
-  // Movimientos
-  const tablaMovimientosBody = document.querySelector("#tabla-movimientos tbody");
-  const btnTirarZ = document.getElementById("btn-tirar-z");
-  // filtro en el HTML tiene id "filtroCajero"
-  const filtroCajero = document.getElementById("filtroCajero");
-
-  // Historial (nuevas referencias)
-  const tablaHistorialBody = document.querySelector("#tabla-historial tbody");
-  const historialInfo = document.getElementById("historial-info"); // opcional en HTML
-
-  // Config
-  const inputConfigNombre = document.getElementById("config-nombre");
-  const inputConfigPassActual = document.getElementById("config-pass-actual");
-  const inputConfigPassNueva = document.getElementById("config-pass-nueva");
-  const btnGuardarConfig = document.getElementById("guardar-config");
-  const inputMasterPass = document.getElementById("master-pass");
-  const btnRestaurar = document.getElementById("btn-restaurar");
-  const configMsg = document.getElementById("config-msg");
-
-  // Navigation
-  const navBtns = document.querySelectorAll(".nav-btn");
-  const sections = document.querySelectorAll("main section");
-  const btnBuscarStock = document.getElementById("buscar-stock");
-
-  // -----------------------
-  // Estado local
-  // -----------------------
-  let cajeroActivo = null;
-  let carrito = []; // {codigo, nombre, precio:number, cantidad:number}
-  let total = 0;
-  let movimientosCache = {}; // cache para movimientos -> {id: mov}
-  let cajerosCache = {}; // cache cajeros -> {nro: caj}
-  let configCache = null;
-
-  // -----------------------
-  // Utilidades
-  // -----------------------
-  function escapeHtml(str) {
-    return String(str || "").replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]);
-  }
-
-  function formatoPrecioParaPantalla(num) {
-    const n = Number(num) || 0;
-    return `$${n.toFixed(2).replace(".", ",")}`;
-  }
-
-  function ahoraISO() {
-    return new Date().toISOString();
-  }
-
-  function formatoFechaIsoToDisplay(iso) {
-    if (!iso) return "";
-    const d = new Date(iso);
-    const dd = d.getDate().toString().padStart(2, "0");
-    const mm = (d.getMonth() + 1).toString().padStart(2, "0");
-    const yyyy = d.getFullYear();
-    const hh = d.getHours().toString().padStart(2, "0");
-    const mi = d.getMinutes().toString().padStart(2, "0");
-    return `${dd}/${mm}/${yyyy} (${hh}:${mi})`;
-  }
-
-  function formatFechaParaHeader(iso) {
-    return formatoFechaIsoToDisplay(iso);
-  }
-
-  function safeNumber(x) {
-    const n = Number(x);
-    return Number.isFinite(n) ? n : 0;
-  }
-
-// -----------------------
-// MODALES (adaptados a CSS V3.0)
-// -----------------------
-let modalOverlay, modalContent;
-
-function mostrarModal(html) {
-  cerrarModal(); // cerrar cualquier modal abierto
-
-  // crear overlay
-  modalOverlay = document.createElement("div");
-  modalOverlay.className = "modal-overlay";
-
-  // crear contenido
-  modalContent = document.createElement("div");
-  modalContent.className = "modal";
-  modalContent.innerHTML = html;
-
-  modalOverlay.appendChild(modalContent);
-  document.body.appendChild(modalOverlay);
-
-  // cerrar al click en overlay (fuera del contenido)
-  modalOverlay.addEventListener("click", (e) => {
-    if (e.target === modalOverlay) cerrarModal();
-  });
-
-  // opción: cerrar con Escape
-  document.addEventListener("keydown", keyListener);
-}
-
-function cerrarModal() {
-  if (modalOverlay) {
-    document.body.removeChild(modalOverlay);
-    modalOverlay = null;
-    modalContent = null;
-    document.removeEventListener("keydown", keyListener);
-  }
-}
-
-function keyListener(e) {
-  if (e.key === "Escape") cerrarModal();
-}
-
-  // verifica pass admin consultando config en DB
-async function verificarPassAdmin(pass) {
-  try {
-    const snap = await window.get(window.ref(window.db, "config"));
-    if (!snap.exists()) return false;
-    const conf = snap.val();
-    configCache = conf;
-    return String(pass).trim() === String(conf.passAdmin).trim();
-  } catch (e) {
-    console.error("verificarPassAdmin error", e);
-    return false;
-  }
-}
-
-  // require admin via modal input (calls callback only when ok)
-  function requireAdminConfirm(actionCallback) {
-    mostrarModal(`
-      <h3>Contraseña Administrador</h3>
-      <input type="password" id="__admin_input" placeholder="Contraseña admin">
-      <div style="margin-top:10px">
-        <button id="__admin_ok">✅Aceptar</button>
-        <button id="__admin_cancel">❌Cancelar</button>
-      </div>
-    `);
-    document.getElementById("__admin_ok").onclick = async () => {
-      const v = (document.getElementById("__admin_input").value || "").trim();
-      const ok = await verificarPassAdmin(v);
-      if (ok) {
-        cerrarModal();
-        actionCallback();
-      } else {
-        alert("Contraseña incorrecta");
-      }
-    };
-    document.getElementById("__admin_cancel").onclick = cerrarModal;
-  }
-
-//REQUIERE INICIAR SESIÓN ANTES DE EJECUTAR LA APP
-  (async () => {
-  const authKey = "adm_auth_ok"; // clave localStorage
-  const snapConfig = await window.get(window.ref(window.db, "config"));
-  const conf = snapConfig.exists() ? snapConfig.val() : {};
-  const adminPass = conf.passAdmin || "0123456789";
-  const masterPass = "9999";
-
-  // si ya pasó auth antes, no pedimos
-  if (localStorage.getItem(authKey) === "ok") return;
-
-  // mostrar modal obligatorio
-  function pedirPass() {
-    return new Promise(resolve => {
-      mostrarModal(`
-        <h3>Acceso Administrador</h3>
-        <p>Ingrese contraseña para continuar</p>
-        <input id="adm-pass" type="password" style="width:100%; margin:10px 0; padding:6px">
-        <div style="text-align:right">
-          <button id="adm-ok">✅Aceptar</button>
-        </div>
-      `);
-
-      document.getElementById("adm-ok").onclick = () => {
-        const v = (document.getElementById("adm-pass").value || "").trim();
-        if (v === adminPass || v === masterPass) {
-          localStorage.setItem(authKey, "ok"); // recordar sesión
-          cerrarModal();
-          resolve(true);
-        } else {
-          alert("❌ Contraseña incorrecta ❌");
-        }
-      };
-    });
-  }
-
-  await pedirPass();
-})();
-
-  
-  // -----------------------
-  // NAVIGATION
-  // -----------------------
-  (function initNavigation() {
-    if (!navBtns.length || !sections.length) return;
-    function showSection(id) {
-      sections.forEach(s => s.classList.add("hidden"));
-      navBtns.forEach(b => b.classList.remove("active"));
-      const sec = document.getElementById(id);
-      if (sec) sec.classList.remove("hidden");
-      const btn = Array.from(navBtns).find(b => b.dataset.section === id);
-      if (btn) btn.classList.add("active");
+  async function loadCajeros() {
+    const snap = await window.get(window.ref("/cajeros"));
+    loginUsuario.innerHTML = "";
+    if (snap.exists()) {
+      Object.keys(snap.val()).forEach(k => {
+        const opt = document.createElement("option");
+        opt.value = k;
+        opt.textContent = snap.val()[k].nombre;
+        loginUsuario.appendChild(opt);
+      });
     }
-    navBtns.forEach(btn => btn.addEventListener("click", () => {
-      if (btn.dataset && btn.dataset.section) showSection(btn.dataset.section);
-    }));
-    // default
-    const defaultBtn = document.querySelector('.nav-btn[data-section="cobro"]') || navBtns[0];
-    if (defaultBtn) defaultBtn.click();
-  })();
+  }
 
-  // -----------------------
-  // Inicializacion selects
-  // -----------------------
-  (function initSelects() {
-    // cobro cantidad 1..99
-    if (cobroCantidadSelect) {
-      cobroCantidadSelect.innerHTML = "";
-      for (let i = 1; i <= 99; i++) {
-        const o = document.createElement("option");
-        o.value = i;
-        o.textContent = i.toString().padStart(2, "0");
-        cobroCantidadSelect.appendChild(o);
-      }
-    }
-    // stock cantidad 1..999
-    if (stockCantidadSelect) {
-      stockCantidadSelect.innerHTML = "";
-      for (let i = 1; i <= 999; i++) {
-        const o = document.createElement("option");
-        o.value = i;
-        o.textContent = i.toString().padStart(3, "0");
-        stockCantidadSelect.appendChild(o);
-      }
-    }
-    // cajero nro select used when adding cajero
-    if (cajeroNroSelect) {
-      cajeroNroSelect.innerHTML = "";
-      for (let i = 1; i <= 99; i++) {
-        const v = i.toString().padStart(2, "0");
-        const o = document.createElement("option");
-        o.value = v;
-        o.textContent = v;
-        cajeroNroSelect.appendChild(o);
-      }
-    }
-    // loginUsuario 01..99
-    if (loginUsuario) {
-      loginUsuario.innerHTML = "";
-      for (let i = 1; i <= 99; i++) {
-        const v = i.toString().padStart(2, "0");
-        const o = document.createElement("option");
-        o.value = v;
-        o.textContent = v;
-        loginUsuario.appendChild(o);
-      }
-    }
-    // filtroCajero will be filled by DB listener (includes TODOS)
-  })();
-
- // -----------------------
-// COBRAR (login + cart)
-// -----------------------
-
-// Referencias nuevas
-const cobroProductosSelect = document.getElementById("cobro-productos");
-const btnAddProduct = document.getElementById("btn-add-product");
-
-// Login de cajero
-if (btnLogin) {
   btnLogin.addEventListener("click", async () => {
-    const nro = (loginUsuario.value || "").trim();
-    const pass = (loginPass.value || "").trim();
     loginMsg.textContent = "";
-    if (!nro || !pass) {
-      loginMsg.textContent = "Complete usuario y contraseña";
-      return;
-    }
-
-    const snap = await window.get(window.ref(window.db, `cajeros/${nro}`));
-    if (!snap.exists()) {
-      loginMsg.textContent = "Cajero no encontrado";
-      return;
-    }
-
-    const caj = snap.val();
-    if (caj.pass !== pass) {
+    const userId = loginUsuario.value;
+    const password = loginPass.value;
+    const userSnap = await window.get(window.ref(`/cajeros/${userId}`));
+    if (userSnap.exists() && userSnap.val().pass === password) {
+      currentUser = { id: userId, ...userSnap.val() };
+      loginModal.classList.add("hidden");
+      cobroControles.classList.remove("hidden");
+      showSection("cobro");
+    } else {
       loginMsg.textContent = "Contraseña incorrecta";
-      return;
-    }
-
-    cajeroActivo = caj;
-    loginModal.classList.add("hidden");
-    cobroControles.classList.remove("hidden");
-
-    const appTitle = document.getElementById("app-title");
-    if (appTitle) {
-      const nombreTienda = (configCache && configCache.shopName) ? configCache.shopName : "ZONAPC";
-      appTitle.textContent = `${nombreTienda} - Cajero ${cajeroActivo.nro}`;
     }
   });
-}
 
-// -----------------------
-// FUNCIONES DE COBRO
-// -----------------------
-
-// Agregar producto al carrito
-async function agregarProductoCarrito(codigo) {
-  codigo = (codigo || "").trim();
-  const cantidad = safeNumber(cobroCantidadSelect.value);
-  if (!codigo) return;
-
-  const snap = await window.get(window.ref(window.db, `stock/${codigo}`));
-  if (!snap.exists()) {
-    alert("Producto no encontrado en stock");
-    return;
-  }
-
-  const prod = snap.val();
-  const precioNumber = (typeof prod.precio === "number")
-    ? prod.precio
-    : Number(String(prod.precio).replace(",", "."));
-
-  if (Number(prod.cantidad) < cantidad) {
-    alert("Stock insuficiente");
-    return;
-  }
-
-  // Si ya está en carrito, sumar cantidades
-  const idx = carrito.findIndex(it => it.codigo === codigo);
-  if (idx >= 0) {
-    carrito[idx].cantidad += cantidad;
-  } else {
-    carrito.push({
-      codigo,
-      nombre: prod.nombre || "SIN NOMBRE",
-      precio: Number(precioNumber) || 0,
-      cantidad
-    });
-  }
-
-  // Actualizar stock en DB
-  await window.update(window.ref(window.db, `stock/${codigo}`), {
-    cantidad: Math.max(0, Number(prod.cantidad) - cantidad)
-  });
-
-  renderCarrito();
-}
-
-// Enter en input de código
-if (cobroCodigo) {
-  cobroCodigo.addEventListener("keydown", async (e) => {
-    if (e.key !== "Enter") return;
-    await agregarProductoCarrito(cobroCodigo.value);
-    cobroCodigo.value = "";
-  });
-}
-
-// Click en botón OK (usa select o input)
-if (btnAddProduct) {
-  btnAddProduct.addEventListener("click", async () => {
-    let codigo = cobroProductosSelect.value;
-    if (!codigo) codigo = cobroCodigo.value;
-    if (!codigo) return alert("Seleccione un producto o ingrese un código");
-    await agregarProductoCarrito(codigo);
-    cobroCodigo.value = "";
-    cobroProductosSelect.value = "";
-  });
-}
-
-// Render del carrito
-function renderCarrito() {
-  if (!tablaCobroBody) return;
-  tablaCobroBody.innerHTML = "";
-  total = 0;
-
-  carrito.forEach((it, i) => {
-    const tr = document.createElement("tr");
-    const rowTotal = Number(it.precio) * Number(it.cantidad);
-    total += rowTotal;
-    tr.innerHTML = `
-      <td>${it.cantidad}</td>
-      <td>${escapeHtml(it.nombre)}</td>
-      <td>${formatoPrecioParaPantalla(it.precio)}</td>
-      <td>${formatoPrecioParaPantalla(rowTotal)}</td>
-      <td><button class="btn-delete-cart" data-i="${i}">Eliminar</button></td>
-    `;
-    tablaCobroBody.appendChild(tr);
-  });
-
-  if (totalDiv) totalDiv.textContent = `TOTAL: ${formatoPrecioParaPantalla(total)}`;
-  if (btnCobrar) btnCobrar.classList.toggle("hidden", carrito.length === 0);
-
-  // Botones eliminar con confirmación admin
-  document.querySelectorAll(".btn-delete-cart").forEach(btn => {
-    btn.onclick = () => {
-      const i = Number(btn.dataset.i);
-      const it = carrito[i];
-      requireAdminConfirm(async () => {
-        const snap = await window.get(window.ref(window.db, `stock/${it.codigo}`));
-        if (snap.exists()) {
-          const prod = snap.val();
-          await window.update(window.ref(window.db, `stock/${it.codigo}`), {
-            cantidad: Number(prod.cantidad) + Number(it.cantidad)
-          });
-        }
-        carrito.splice(i, 1);
-        renderCarrito();
-      });
-    };
-  });
-}
-
-// Actualizar select de productos en tiempo real
-if (cobroProductosSelect) {
-  window.onValue(window.ref(window.db, "stock"), snap => {
-    if (!snap.exists()) return;
-    const data = snap.val();
-    cobroProductosSelect.innerHTML = '<option value="">Elija un Item</option>';
-    Object.entries(data).forEach(([codigo, prod]) => {
-      cobroProductosSelect.innerHTML += `<option value="${codigo}">${escapeHtml(prod.nombre || codigo)}</option>`;
-    });
-  });
-}
-
-// -----------------------
-// SUELTOS EN COBRAR
-// -----------------------
-const cobroSueltosSelect = document.getElementById("cobro-sueltos");
-const inputKgSueltoCobro = document.getElementById("input-kg-suelto");
-const inputCodigoSueltoCobro = document.getElementById("cobro-codigo-suelto");
+// --- COBRO ---
+const cobroProductos = document.getElementById("cobro-productos");
+const cobroSueltos = document.getElementById("cobro-sueltos");
+const cobroCantidad = document.getElementById("cobro-cantidad");
+const inputCodigoProducto = document.getElementById("cobro-codigo");
+const inputCodigoSuelto = document.getElementById("cobro-codigo-suelto");
+const inputKgSuelto = document.getElementById("input-kg-suelto");
+const btnAddProduct = document.getElementById("btn-add-product");
 const btnAddSuelto = document.getElementById("btn-add-suelto");
-const btnIncrKgCobro = document.getElementById("btn-incr-kg");
-const btnDecrKgCobro = document.getElementById("btn-decr-kg");
+const btnKgMas = document.getElementById("btn-incr-kg");
+const btnKgMenos = document.getElementById("btn-decr-kg");
+const tablaCobro = document.getElementById("tabla-cobro").querySelector("tbody");
+const totalDiv = document.getElementById("total-div");
+const btnCobrar = document.getElementById("btn-cobrar");
+const cobroSueltosPrecio = document.getElementById("cobro-sueltos-precio");
+const inputCodigoPrecio = document.getElementById("cobro-codigo-precio");
+const inputPrecioSuelto = document.getElementById("input-precio-suelto");
+const btnAddPrecio = document.getElementById("btn-add-precio");
 
-// Actualizar select de sueltos en tiempo real
-if (cobroSueltosSelect) {
-  window.onValue(window.ref(window.db, "sueltos"), snap => {
-    if (!snap.exists()) return;
-    const data = snap.val();
-    cobroSueltosSelect.innerHTML = '<option value="">Elija un Item (Sueltos)</option>';
-    Object.entries(data).forEach(([codigo, prod]) => {
-      if (Number(prod.kg) > 0) {
-        cobroSueltosSelect.innerHTML += `<option value="${codigo}">${escapeHtml(prod.nombre || codigo)}</option>`;
-      }
-    });
+let carrito = [];
+
+// --- Funciones de carga ---
+async function loadProductos() {
+  const snap = await window.get(window.ref("/stock"));
+  cobroProductos.innerHTML = '<option value="">Elija un Item</option>';
+  if (snap.exists()) Object.entries(snap.val()).forEach(([k, v]) => {
+    const opt = document.createElement("option");
+    opt.value = k;
+    opt.textContent = v.nombre;
+    cobroProductos.appendChild(opt);
   });
-}
 
-// Ajustar valor del input sin superar stock
-async function ajustarKgInput(codigo, incremento) {
-  if (!codigo) return;
-  const snap = await window.get(window.ref(window.db, `sueltos/${codigo}`));
-  if (!snap.exists()) return alert("Producto suelto no encontrado");
+  const sueltosSnap = await window.get(window.ref("/sueltos"));
+  cobroSueltos.innerHTML = '<option value="">Elija un Item (Sueltos)</option>';
+  if (sueltosSnap.exists()) Object.entries(sueltosSnap.val()).forEach(([k, v]) => {
+    const opt = document.createElement("option");
+    opt.value = k;
+    opt.textContent = v.nombre;
+    cobroSueltos.appendChild(opt);
+  });
 
-  const prod = snap.val();
-  let val = Number(inputKgSueltoCobro.value) + incremento;
-
-  if (val > Number(prod.kg)) {
-    val = Number(prod.kg);
-    if (incremento > 0) alert(`Stock insuficiente: solo hay ${prod.kg.toFixed(3)} kg de ${prod.nombre}`);
-  }
-  if (val < 0) val = 0;
-
-  inputKgSueltoCobro.value = val.toFixed(3);
-}
-
-// Incrementar / decrementar KG
-btnIncrKgCobro.onclick = async () => {
-  const codigo = cobroSueltosSelect.value || inputCodigoSueltoCobro.value;
-  await ajustarKgInput(codigo, 0.1);
-};
-
-btnDecrKgCobro.onclick = async () => {
-  const codigo = cobroSueltosSelect.value || inputCodigoSueltoCobro.value;
-  await ajustarKgInput(codigo, -0.1);
-};
-
-// Agregar suelto al carrito con validación estricta de stock
-async function agregarSueltoCarrito(codigo) {
-  codigo = (codigo || "").trim();
-  if (!codigo) return;
-
-  const snap = await window.get(window.ref(window.db, `sueltos/${codigo}`));
-  if (!snap.exists()) return alert("Producto suelto no encontrado");
-
-  const prod = snap.val();
-  let kg = safeNumber(inputKgSueltoCobro.value);
-
-  if (kg <= 0) return alert(`Ingrese cantidad válida de ${prod.nombre}`);
-  if (kg > Number(prod.kg)) {
-    alert(`Stock insuficiente: solo hay ${Number(prod.kg).toFixed(3)} kg de ${prod.nombre}`);
-    inputKgSueltoCobro.value = Number(prod.kg).toFixed(3);
-    return;
+  cobroCantidad.innerHTML = "";
+  for (let i = 1; i <= 99; i++) {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = i;
+    cobroCantidad.appendChild(opt);
   }
 
-  const precioNumber = (typeof prod.precio === "number")
-    ? prod.precio
-    : Number(String(prod.precio).replace(",", "."));
+  inputCodigoProducto.value = "";
+  inputCodigoSuelto.value = "";
+  inputKgSuelto.value = "0.100";
+  inputCodigoPrecio.value = "";
+  inputPrecioSuelto.value = "000";
+}
 
-  const idx = carrito.findIndex(it => it.codigo === codigo && it.tipo === "suelto");
-  if (idx >= 0) {
-    let suma = carrito[idx].cantidad + kg;
-    if (suma > Number(prod.kg)) {
-      alert(`Stock insuficiente: solo hay ${Number(prod.kg).toFixed(3)} kg de ${prod.nombre}`);
-      carrito[idx].cantidad = Number(prod.kg);
-    } else {
-      carrito[idx].cantidad += kg;
-    }
-  } else {
-    carrito.push({
-      codigo,
-      nombre: prod.nombre || "SIN NOMBRE",
-      precio: Number(precioNumber) || 0,
-      cantidad: kg,
-      tipo: "suelto"
+async function loadSueltosPrecio() {
+  const sueltosSnap = await window.get(window.ref("/sueltos"));
+  cobroSueltosPrecio.innerHTML = '<option value="">Elija un Item (Sueltos)</option>';
+  if (sueltosSnap.exists()) {
+    Object.entries(sueltosSnap.val()).forEach(([k, v]) => {
+      const opt = document.createElement("option");
+      opt.value = k;
+      opt.textContent = v.nombre;
+      cobroSueltosPrecio.appendChild(opt);
     });
   }
-
-  renderCarrito();
+  inputCodigoPrecio.value = "";
+  inputPrecioSuelto.value = "000";
 }
 
-// Enter en input código suelto
-inputCodigoSueltoCobro.addEventListener("keydown", async (e) => {
-  if (e.key !== "Enter") return;
-  await agregarSueltoCarrito(inputCodigoSueltoCobro.value);
-  inputCodigoSueltoCobro.value = "";
-  inputKgSueltoCobro.value = "0.000";
-});
-
-// Click en botón OK suelto
-btnAddSuelto.addEventListener("click", async () => {
-  let codigo = cobroSueltosSelect.value || inputCodigoSueltoCobro.value;
-  if (!codigo) return alert("Seleccione un suelto o ingrese un código");
-  await agregarSueltoCarrito(codigo);
-  inputCodigoSueltoCobro.value = "";
-  cobroSueltosSelect.value = "";
-  inputKgSueltoCobro.value = "0.000";
-});
-  
-// -----------------------
-// COBRAR Y FINALIZAR
-// -----------------------
-
-if (btnCobrar) {
-  btnCobrar.addEventListener("click", () => {
-    if (!cajeroActivo) return alert("Ingrese con un cajero primero");
-    if (carrito.length === 0) return;
-
-    mostrarModal(`
-      <h3>¿Efectivo o Tarjeta?</h3>
-      <div style="margin-top:10px">
-        <button id="__pay_cash">💵 Efectivo</button>
-        <button id="__pay_card">💳 Tarjeta</button>
-        <button id="__pay_cancel">❌ Cancelar</button>
-      </div>
-    `);
-
-    document.getElementById("__pay_cancel").onclick = cerrarModal;
-    document.getElementById("__pay_cash").onclick = () => finalizarCobro("Efectivo");
-    document.getElementById("__pay_card").onclick = () => finalizarCobro("Tarjeta");
-  });
+// --- Inicialización ---
+async function inicializarCobro() {
+  await loadProductos();
+  await loadSueltosPrecio();
 }
+inicializarCobro();
 
-// Generador de número de ticket secuencial diario
-function generarNumeroTicket() {
-  const hoy = new Date().toISOString().slice(0, 10); // yyyy-mm-dd
-  const ultimaFecha = localStorage.getItem("ticket_fecha");
-  let contador = parseInt(localStorage.getItem("ticket_contador") || "0", 10);
-  if (ultimaFecha !== hoy) {
-    contador = 0;
-    localStorage.setItem("ticket_fecha", hoy);
-  }
-  contador++;
-  localStorage.setItem("ticket_contador", contador);
-  return "ID_" + String(contador).padStart(6, "0");
-}
-
-// Finalizar cobro y guardar en historial
-async function finalizarCobro(tipoPago) {
-  cerrarModal();
-  const movId = generarNumeroTicket();
-  const mov = {
-    id: movId,
-    cajero: cajeroActivo ? (cajeroActivo.nro || cajeroActivo.nombre) : "N/A",
-    total,
-    tipo: tipoPago,
-    fecha: ahoraISO(),
-    items: carrito.map(it => ({
-  codigo: it.codigo,
-  nombre: it.nombre,
-  precio: it.precio,
-  cantidad: it.cantidad,
-  tipo: it.tipo || "normal"
-}))
-  };
-
-  // Actualizar stock de sueltos
-for (let it of carrito) {
-  if (it.tipo === "suelto") {
-    const refSuelto = window.ref(window.db, `sueltos/${it.codigo}`);
-    const snap = await window.get(refSuelto);
-    if (snap.exists()) {
-      const prod = snap.val();
-      let nuevoKg = Math.max(0, Number(prod.kg) - Number(it.cantidad)); // no bajar de 0.1 ha sido desactivado
-      await window.update(refSuelto, { kg: Number(nuevoKg.toFixed(3)), fecha: ahoraISO() });
-    }
-  }
-}
-
-  // Guardar en movimientos
-  await window.set(window.ref(window.db, `movimientos/${movId}`), mov);
-
-  // Guardar copia en historial por año-mes
-  try {
-    const fechaMov = mov.fecha ? new Date(mov.fecha) : new Date();
-    const año = fechaMov.getFullYear();
-    const mes = String(fechaMov.getMonth() + 1).padStart(2, "0");
-    await window.set(window.ref(window.db, `historial/${año}-${mes}/${movId}`), mov);
-  } catch (err) {
-    console.error("❌ Error guardando en historial:", err);
-  }
-
-  imprimirTicketMov(mov);
-  carrito = [];
-  renderCarrito();
-  alert("✅ Venta finalizada");
-}
-
-// -----------------------
-// STOCK
-// -----------------------
-window.onValue(window.ref(window.db, "stock"), snap => {
-  if (!tablaStockBody) return;
-  tablaStockBody.innerHTML = "";
-  if (!snap.exists()) return;
-
-  const data = snap.val();
-
-  // Convertir a array y ordenar por fecha (descendente)
-  const ordenados = Object.entries(data).sort(([, a], [, b]) => {
-    const ta = a.fecha ? new Date(a.fecha).getTime() : 0;
-    const tb = b.fecha ? new Date(b.fecha).getTime() : 0;
-    return tb - ta; // más nuevo primero
-  });
-
-  ordenados.forEach(([codigo, prod]) => {
+// --- Tabla de cobro ---
+function actualizarTabla() {
+  tablaCobro.innerHTML = "";
+  let total = 0;
+  carrito.forEach((item, idx) => {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${escapeHtml(codigo)}</td>
-      <td>${escapeHtml(prod.nombre || "")}</td>
-      <td>${Number(prod.cantidad) || 0}</td>
-      <td>${prod.fecha ? formatoFechaIsoToDisplay(prod.fecha) : ""}</td>
-      <td>${typeof prod.precio === "number" ? formatoPrecioParaPantalla(prod.precio) : ('$' + String(prod.precio || "").replace('.',','))}</td>
-      <td>
-        <button class="btn-edit-stock" data-id="${codigo}">✏️</button>
-        <button class="btn-del-stock" data-id="${codigo}">❌</button>
-      </td>
+      <td>${item.tipo === "stock" ? item.cant : item.cant.toFixed(3)}</td>
+      <td>${item.nombre}</td>
+      <td>${item.precio.toFixed(2)}</td>
+      <td>${(item.cant * item.precio).toFixed(2)}</td>
+      <td><button data-idx="${idx}">❌</button></td>
     `;
-    tablaStockBody.appendChild(tr);
+    tr.querySelector("button").addEventListener("click", () => {
+      carrito.splice(idx, 1);
+      actualizarTabla();
+    });
+    tablaCobro.appendChild(tr);
+    total += item.cant * item.precio;
   });
+  totalDiv.textContent = `TOTAL: $${total.toFixed(2)}`;
+  btnCobrar.classList.toggle("hidden", carrito.length === 0);
+}
 
-  // Reasignar eventos a botones
-  document.querySelectorAll(".btn-del-stock").forEach(btn => {
-    btn.onclick = () => {
-      requireAdminConfirm(async () => {
-        await window.remove(window.ref(window.db, `stock/${btn.dataset.id}`));
+// --- Carrito ---
+async function agregarAlCarrito(nuevoItem) {
+  const snap = await window.get(window.ref(`/${nuevoItem.tipo}/${nuevoItem.id}`));
+  if (!snap.exists()) return alert("Producto no encontrado");
+  const data = snap.val();
+
+  const idx = carrito.findIndex(it => it.id === nuevoItem.id && it.tipo === nuevoItem.tipo);
+  let totalCant = nuevoItem.cant;
+  if (idx >= 0) totalCant += carrito[idx].cant;
+
+  if ((nuevoItem.tipo === "stock" && totalCant > data.cant) || (nuevoItem.tipo === "sueltos" && totalCant > data.kg)) {
+    return alert("STOCK INSUFICIENTE");
+  }
+
+  if (idx >= 0) carrito[idx].cant += nuevoItem.cant;
+  else carrito.push(nuevoItem);
+
+  actualizarTabla();
+}
+
+// --- Botones AGREGAR ---
+btnAddProduct.addEventListener("click", async () => {
+  let id = cobroProductos.value || inputCodigoProducto.value.trim();
+  let cant = parseInt(cobroCantidad.value);
+  if (!id || cant <= 0) return;
+
+  const snap = await window.get(window.ref(`/stock/${id}`));
+  if (!snap.exists()) return alert("Producto no encontrado");
+  const data = snap.val();
+
+  if (cant > data.cant) return alert("STOCK INSUFICIENTE");
+
+  agregarAlCarrito({ id, nombre: data.nombre, cant, precio: data.precio, tipo: "stock" });
+  inputCodigoProducto.value = "";
+});
+
+btnAddSuelto.addEventListener("click", async () => {
+  let id = cobroSueltos.value || inputCodigoSuelto.value.trim();
+  let cant = parseFloat(inputKgSuelto.value);
+  if (!id || cant <= 0) return;
+
+  const snap = await window.get(window.ref(`/sueltos/${id}`));
+  if (!snap.exists()) return alert("Producto no encontrado");
+  const data = snap.val();
+
+  if (cant > data.kg) return alert("STOCK INSUFICIENTE");
+
+  agregarAlCarrito({ id, nombre: data.nombre, cant, precio: data.precio, tipo: "sueltos" });
+  inputKgSuelto.value = "0.100";
+  inputCodigoSuelto.value = "";
+});
+
+btnAddPrecio.addEventListener("click", async () => {
+  let id = cobroSueltosPrecio.value || inputCodigoPrecio.value.trim();
+  let precioIngresado = parseInt(inputPrecioSuelto.value);
+  if (!id || precioIngresado <= 0) return;
+
+  const snap = await window.get(window.ref(`/sueltos/${id}`));
+  if (!snap.exists()) return alert("Producto no encontrado");
+  const data = snap.val();
+
+  let cant = parseFloat((precioIngresado / data.precio).toFixed(3));
+  if (cant > data.kg) return alert("STOCK INSUFICIENTE");
+
+  agregarAlCarrito({ id, nombre: data.nombre, cant, precio: data.precio, tipo: "sueltos" });
+
+  inputPrecioSuelto.value = "000";
+  inputCodigoPrecio.value = "";
+});
+
+// --- Botones + / - sueltos ---
+btnKgMas.addEventListener("click", () => {
+  inputKgSuelto.value = (parseFloat(inputKgSuelto.value) + 0.100).toFixed(3);
+});
+btnKgMenos.addEventListener("click", () => {
+  let val = parseFloat(inputKgSuelto.value) - 0.100;
+  if (val < 0.100) val = 0.100;
+  inputKgSuelto.value = val.toFixed(3);
+});
+
+// --- IMPRIMIR TICKET ---
+function imprimirTicket(ticketID, fecha, cajeroID, items, total, tipoPago) {
+  const iframe = document.createElement("iframe");
+  iframe.style.position = "absolute";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  document.body.appendChild(iframe);
+
+  const doc = iframe.contentWindow.document;
+  doc.open();
+  doc.write(`
+    <html>
+      <head>
+        <style>
+          body { font-family: monospace; font-size: 13px; max-width: 6cm; white-space: pre-line; margin:0; padding:6px; }
+          .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
+          .bloque { margin-bottom:8px; }
+          .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
+        </style>
+      </head>
+      <body>
+        <div class="titulo">*** VENTA ***</div>
+        <div class="bloque">${fecha}</div>
+        <div class="bloque" style="white-space: pre-line;">
+          ${items.map(it => `${it.nombre} $${it.precio.toFixed(2)} (x${it.cant}) = $${(it.cant*it.precio).toFixed(2)}\n--------------------------------`).join("\n")}
+          \nTOTAL: $${total.toFixed(2)}\nPago en: ${tipoPago}
+        </div>
+        <div class="total">TOTAL: $${total.toFixed(2)}</div>
+      </body>
+    </html>
+  `);
+  doc.close();
+  iframe.contentWindow.focus();
+  iframe.contentWindow.print();
+  setTimeout(() => iframe.remove(), 500);
+}
+
+// --- COBRAR ---
+btnCobrar.addEventListener("click", async () => {
+  if (!currentUser || carrito.length === 0) return;
+
+  const modal = document.createElement("div");
+  modal.style.cssText = `
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    display:flex; justify-content:center; align-items:center;
+    background:rgba(0,0,0,0.7); z-index:9999;
+  `;
+  modal.innerHTML = `
+    <div style="background:#fff; padding:20px; border-radius:10px; text-align:center;">
+      <h2>¿Cómo Pagará el Cliente?</h2>
+      <div style="display:flex; flex-wrap:wrap; gap:5px; justify-content:center; margin:10px 0;">
+        <button data-pay="Efectivo">Efectivo</button>
+        <button data-pay="Tarjeta">Tarjeta</button>
+        <button data-pay="QR">QR</button>
+        <button data-pay="Electrónico">Electrónico</button>
+        <button data-pay="Otro">Otro</button>
+      </div>
+      <button id="cancelar-pago" style="background:red; color:#fff; padding:5px 15px;">Cancelar</button>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  document.getElementById("cancelar-pago").addEventListener("click", () => modal.remove());
+
+  modal.querySelectorAll("button[data-pay]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const tipoPago = btn.dataset.pay;
+      const fechaHoy = new Date().toISOString().split("T")[0];
+
+      const confSnap = await window.get(window.ref("/config"));
+      const confVal = confSnap.exists() ? confSnap.val() : {};
+      let ultimoID = confVal.ultimoTicketID || 0;
+      let ultimoFecha = confVal.ultimoTicketFecha || "";
+
+      if (ultimoFecha !== fechaHoy) ultimoID = 0;
+      ultimoID++;
+      const ticketID = "ID_" + String(ultimoID).padStart(6, "0");
+
+      const fecha = new Date();
+      const fechaStr = `${fecha.getDate().toString().padStart(2,'0')}/${(fecha.getMonth()+1).toString().padStart(2,'0')}/${fecha.getFullYear()} (${fecha.getHours().toString().padStart(2,'0')}:${fecha.getMinutes().toString().padStart(2,'0')})`;
+      const total = carrito.reduce((a,b)=>a+b.cant*b.precio,0);
+
+      // Guardar movimientos
+      await window.set(window.ref(`/movimientos/${ticketID}`), {
+        ticketID,
+        cajero: currentUser.id,
+        items: carrito,
+        total,
+        fecha: fecha.toISOString(),
+        tipo: tipoPago,
+        eliminado: false
       });
-    };
-  });
-  document.querySelectorAll(".btn-edit-stock").forEach(btn => {
-    btn.onclick = () => requireAdminConfirm(() => editarStockModal(btn.dataset.id));
+
+      // Guardar historial
+      await window.set(window.ref(`/historial/${ticketID}`), {
+        ticketID,
+        cajero: currentUser.id,
+        items: carrito,
+        total,
+        fecha: fecha.toISOString(),
+        tipo: tipoPago
+      });
+
+      // Actualizar config
+      await window.update(window.ref("/config"), { ultimoTicketID: ultimoID, ultimoTicketFecha: fechaHoy });
+
+      // Actualizar stock
+      for (const item of carrito) {
+        const snapItem = await window.get(window.ref(`/${item.tipo}/${item.id}`));
+        if (snapItem.exists()) {
+          const data = snapItem.val();
+          if (item.tipo === "stock") await window.update(window.ref(`/${item.tipo}/${item.id}`), { cant: data.cant - item.cant });
+          else await window.update(window.ref(`/${item.tipo}/${item.id}`), { kg: data.kg - item.cant });
+        }
+      }
+
+      // Imprimir ticket
+      imprimirTicket(ticketID, fechaStr, currentUser.id, carrito, total, tipoPago);
+
+      alert("VENTA FINALIZADA");
+
+      carrito = [];
+      actualizarTabla();
+      loadStock();
+      loadSueltos();
+      loadMovimientos();
+      loadHistorial();
+      modal.remove();
+    });
   });
 });
 
-// === Botón AGREGAR STOCK ===
-if (btnAgregarStock) {
-  btnAgregarStock.addEventListener("click", async () => {
-    const codigo = (inputStockCodigo.value || "").trim();
-    const cantidad = safeNumber(stockCantidadSelect.value);
-    if (!codigo) {
-      alert("Ingrese código");
+
+// --- MOVIMIENTOS ---
+const tablaMovimientos = document.getElementById("tabla-movimientos").querySelector("tbody");
+const filtroCajero = document.getElementById("filtroCajero");
+const btnTirarZ = document.getElementById("btn-tirar-z");
+
+// Cargar movimientos
+async function loadMovimientos() {
+  const snap = await window.get(window.ref("/movimientos"));
+  tablaMovimientos.innerHTML = "";
+  filtroCajero.innerHTML = '<option value="TODOS">TODOS</option>';
+  if (!snap.exists()) return;
+
+  const entries = Object.entries(snap.val()).sort(([, a], [, b]) => new Date(b.fecha) - new Date(a.fecha));
+
+  entries.forEach(([id, mov]) => {
+    if (filtroCajero.value !== "TODOS" && mov.cajero !== filtroCajero.value) return;
+    const tr = document.createElement("tr");
+    const eliminado = mov.eliminado || false;
+
+    tr.style.backgroundColor = eliminado ? "#ccc" : "";
+    tr.innerHTML = `
+      <td>${id}</td>
+      <td>${mov.total.toFixed(2)}</td>
+      <td>${mov.tipo}</td>
+      <td>
+        <button class="reimprimir" data-id="${id}" ${eliminado ? "disabled" : ""}>🖨</button>
+        <button class="eliminar" data-id="${id}" ${eliminado ? "disabled" : ""}>❌</button>
+      </td>
+    `;
+
+    // --- REIMPRIMIR MOVIMIENTO ---
+    tr.querySelector(".reimprimir").addEventListener("click", () => {
+      const fechaFormateada = `${new Date(mov.fecha).toLocaleDateString()} (${new Date(mov.fecha).getHours().toString().padStart(2,"0")}:${new Date(mov.fecha).getMinutes().toString().padStart(2,"0")})`;
+
+      let cuerpo = '';
+      mov.items.forEach(it => {
+        cuerpo += `${it.nombre} $${it.precio.toFixed(2)} (x${it.cant}) = $${(it.precio*it.cant).toFixed(2)}\n--------------------------------\n`;
+      });
+
+      cuerpo += `TOTAL: $${mov.total.toFixed(2)}\n--------------------------------\n`;
+      cuerpo += `VENTA - Cajero: ${mov.cajero}\n--------------------------------\n`;
+
+      const iframe = document.createElement("iframe");
+      iframe.style.position = "absolute";
+      iframe.style.width = "0";
+      iframe.style.height = "0";
+      document.body.appendChild(iframe);
+
+      const doc = iframe.contentWindow.document;
+      doc.open();
+      doc.write(`
+        <html>
+          <head>
+            <style>
+              body { font-family: monospace; font-size:13px; max-width:6cm; white-space:pre-line; margin:0; padding:6px; }
+              .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
+              .bloque { margin-bottom:8px; }
+              .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
+            </style>
+          </head>
+          <body>
+            <div class="titulo">*** VENTA ***</div>
+            <div class="bloque">${fechaFormateada}</div>
+            <div class="bloque" style="white-space: pre-line;">${cuerpo}</div>
+            <div class="total">TOTAL: $${mov.total.toFixed(2)}</div>
+          </body>
+        </html>
+      `);
+      doc.close();
+      iframe.contentWindow.focus();
+      iframe.contentWindow.print();
+      setTimeout(()=>iframe.remove(),500);
+    });
+
+    // --- ELIMINAR MOVIMIENTO ---
+    tr.querySelector(".eliminar").addEventListener("click", () => {
+      showAdminActionModal(async () => {
+        for (const item of mov.items) {
+          const snapItem = await window.get(window.ref(`/${item.tipo}/${item.id}`));
+          if (!snapItem.exists()) continue;
+          const data = snapItem.val();
+          if (item.tipo === "stock") {
+            await window.update(window.ref(`/${item.tipo}/${item.id}`), { cant: (data.cant || 0) + item.cant });
+          } else {
+            await window.update(window.ref(`/${item.tipo}/${item.id}`), { kg: (data.kg || 0) + item.cant });
+          }
+        }
+        await window.update(window.ref(`/movimientos/${id}`), { eliminado: true });
+        loadMovimientos();
+      });
+    });
+
+    tablaMovimientos.appendChild(tr);
+
+    if (!filtroCajero.querySelector(`option[value="${mov.cajero}"]`)) {
+      const opt = document.createElement("option");
+      opt.value = mov.cajero;
+      opt.textContent = mov.cajero;
+      filtroCajero.appendChild(opt);
+    }
+  });
+}
+
+// --- TIRAR Z ---
+btnTirarZ.addEventListener("click", () => {
+  showAdminActionModal(async () => {
+    const snap = await window.get(window.ref("/movimientos"));
+    if (!snap.exists()) return alert("No hay movimientos para tirar Z");
+
+    const todosMov = Object.entries(snap.val())
+      .filter(([, mov]) => filtroCajero.value === "TODOS" || mov.cajero === filtroCajero.value);
+
+    if (!todosMov.length) return alert("No hay movimientos para el cajero seleccionado");
+
+    const fechaZ = new Date();
+    const zID = `TIRAR_Z_${fechaZ.getTime()}`;
+
+    const totalPorTipoPago = {};
+    let totalGeneral = 0;
+    for (const [, mov] of todosMov) {
+      totalPorTipoPago[mov.tipo] = (totalPorTipoPago[mov.tipo] || 0) + mov.total;
+      totalGeneral += mov.total;
+    }
+
+    const registroZ = {
+      tipo: "TIRAR Z",
+      fecha: fechaZ.toISOString(),
+      fechaExpira: new Date(fechaZ.getFullYear(), fechaZ.getMonth(), fechaZ.getDate() + 1).toISOString(),
+      items: todosMov.map(([id, mov]) => ({ ...mov, ticketID: id })),
+      totalPorTipoPago,
+      totalGeneral,
+      cajeros: [...new Set(todosMov.map(([, mov]) => mov.cajero))],
+      eliminado: false
+    };
+
+    // Guarda en historial y respaldo
+    await window.set(window.ref(`/historial/${zID}`), registroZ);
+    await window.set(window.ref(`/respaldoZ/${zID}`), snap.val());
+
+    // Elimina movimientos
+    for (const [id] of todosMov) await window.remove(window.ref(`/movimientos/${id}`));
+
+    loadMovimientos();
+    if (typeof loadHistorial === "function") loadHistorial();
+
+    // --- Formato estético del ticket Z ---
+    let cuerpo = "";
+    for (const cajero of registroZ.cajeros) {
+      cuerpo += `\nCAJERO: ${cajero}\n------------------------------`;
+      const movCajero = registroZ.items.filter(m => m.cajero === cajero);
+      const tiposPago = [...new Set(movCajero.map(m => m.tipo))];
+      for (const tipo of tiposPago) {
+        const ventasTipo = movCajero.filter(m => m.tipo === tipo);
+        const subtotal = ventasTipo.reduce((acc, m) => acc + m.total, 0);
+        cuerpo += `\n  [${tipo}]  Subtotal: $${subtotal.toFixed(2)}\n`;
+        ventasTipo.forEach(m => {
+          cuerpo += `    #${m.ticketID}\n    $${m.total.toFixed(2)}\n`;
+        });
+      }
+      cuerpo += `\n------------------------------`;
+    }
+
+    // --- Imprimir Z ---
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "absolute";
+    iframe.style.width = "0";
+    iframe.style.height = "0";
+    document.body.appendChild(iframe);
+
+    const doc = iframe.contentWindow.document;
+    doc.open();
+    doc.write(`
+      <html>
+        <head>
+          <style>
+            body { font-family: monospace; font-size:13px; max-width:6cm; white-space:pre-line; margin:0; padding:6px; }
+            .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
+            .bloque { margin-bottom:8px; }
+            .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
+          </style>
+        </head>
+        <body>
+          <div class="titulo">*** CIERRE DE CAJA (Z) ***</div>
+          <div class="bloque">${fechaZ.toLocaleDateString()} (${fechaZ.getHours().toString().padStart(2,"0")}:${fechaZ.getMinutes().toString().padStart(2,"0")})</div>
+          <div class="bloque" style="white-space: pre-line;">${cuerpo}</div>
+          <div class="total">TOTAL: $${totalGeneral.toFixed(2)}</div>
+        </body>
+      </html>
+    `);
+    doc.close();
+    iframe.contentWindow.focus();
+    iframe.contentWindow.print();
+    setTimeout(()=>iframe.remove(),500);
+  });
+});
+
+// --- HISTORIAL ---
+async function loadHistorial() {
+  const tablaHistorial = document.querySelector("#tabla-historial tbody");
+  if (!tablaHistorial) return;
+  tablaHistorial.innerHTML = "";
+
+  const snap = await window.get(window.ref("/historial"));
+  if (!snap.exists()) return;
+
+  const hoy = new Date();
+  const entries = Object.entries(snap.val()).sort(([, a], [, b]) => new Date(b.fecha) - new Date(a.fecha));
+
+  for (const [id, mov] of entries) {
+    const expirada = mov.fechaExpira && new Date(mov.fechaExpira) < hoy;
+    const tr = document.createElement("tr");
+    tr.style.backgroundColor = expirada ? "#eee" : mov.eliminado ? "#ccc" : "";
+
+    let botones = "";
+    if (mov.tipo === "TIRAR Z") {
+      if (!expirada && !mov.eliminado) {
+        botones = `
+          <button class="reimprimir" data-id="${id}">🖨</button>
+          <button class="eliminar-z">❌</button>`;
+      }
+    } else {
+      botones = `<button class="reimprimir" data-id="${id}">🖨</button>`;
+    }
+
+    tr.innerHTML = `
+      <td>${id}</td>
+      <td>${mov.totalGeneral ? mov.totalGeneral.toFixed(2) : mov.total ? mov.total.toFixed(2) : "-"}</td>
+      <td>${mov.tipo}</td>
+      <td>${mov.cajeros ? mov.cajeros.join(", ") : mov.cajero || ""}</td>
+      <td>${new Date(mov.fecha).toLocaleString()}</td>
+      <td>${botones}</td>
+    `;
+
+    // --- REIMPRIMIR DESDE HISTORIAL ---
+    const btnReimprimir = tr.querySelector(".reimprimir");
+    if (btnReimprimir) {
+      btnReimprimir.addEventListener("click", () => {
+        if (mov.tipo === "TIRAR Z") {
+          // --- USAR FORMATO BONITO DE CIERRE Z ---
+          const fechaZ = new Date(mov.fecha);
+          const fechaFormateada = `${fechaZ.toLocaleDateString()} (${fechaZ.getHours().toString().padStart(2,"0")}:${fechaZ.getMinutes().toString().padStart(2,"0")})`;
+
+          let cuerpo = '';
+          for (const cajero of mov.cajeros) {
+            cuerpo += `CAJERO: ${cajero}\n--------------------------------\n`;
+            const movCajero = mov.items.filter(i => i.cajero === cajero);
+            const tiposPago = [...new Set(movCajero.map(i => i.tipo))];
+            for (const tipo of tiposPago) {
+              const ventasTipo = movCajero.filter(i => i.tipo === tipo);
+              const subtotal = ventasTipo.reduce((acc, m) => acc + m.total, 0);
+              cuerpo += ` ${tipo.toUpperCase()} — Subtotal: $${subtotal.toFixed(2)}\n`;
+              ventasTipo.forEach(m => {
+                cuerpo += `   ${m.ticketID.slice(-5)}  $${m.total.toFixed(2)}\n`;
+              });
+              cuerpo += `--------------------------------\n`;
+            }
+            cuerpo += `\n`;
+          }
+          cuerpo += `TOTAL GENERAL: $${mov.totalGeneral.toFixed(2)}\n--------------------------------\n`;
+          cuerpo += `CIERRE COMPLETO - ${mov.cajeros.length} CAJEROS\n`;
+          cuerpo += `--------------------------------\nFIN DEL REPORTE Z\n`;
+
+          const iframe = document.createElement("iframe");
+          iframe.style.position = "absolute";
+          iframe.style.width = "0";
+          iframe.style.height = "0";
+          document.body.appendChild(iframe);
+
+          const doc = iframe.contentWindow.document;
+          doc.open();
+          doc.write(`
+            <html>
+              <head>
+                <style>
+                  body { font-family: monospace; font-size:13px; max-width:6cm; white-space:pre-line; margin:0; padding:6px; }
+                  .titulo { text-align:center; font-weight:bold; border-bottom:1px dashed #000; margin-bottom:6px; padding-bottom:2px; }
+                  .bloque { margin-bottom:8px; }
+                  .total { text-align:center; font-weight:bold; font-size:14px; border-top:1px dashed #000; padding-top:4px; }
+                </style>
+              </head>
+              <body>
+                <div class="titulo">*** CIERRE DE CAJA (Z) ***</div>
+                <div class="bloque">${fechaFormateada}</div>
+                <div class="bloque" style="white-space: pre-line;">${cuerpo}</div>
+                <div class="total">TOTAL: $${mov.totalGeneral.toFixed(2)}</div>
+              </body>
+            </html>
+          `);
+          doc.close();
+          iframe.contentWindow.focus();
+          iframe.contentWindow.print();
+          setTimeout(() => iframe.remove(), 500);
+
+        } else {
+          // Para ventas normales
+          imprimirTicket(mov.ticketID, new Date(mov.fecha).toLocaleString(), mov.cajero, mov.items, mov.total, mov.tipo);
+        }
+      });
+    }
+
+    // --- ELIMINAR Z ---
+    const btnEliminarZ = tr.querySelector(".eliminar-z");
+    if (btnEliminarZ) {
+      btnEliminarZ.addEventListener("click", async () => {
+        showAdminActionModal(async () => {
+          const respaldoSnap = await window.get(window.ref(`/respaldoZ/${id}`));
+          if (respaldoSnap.exists()) {
+            await window.set(window.ref("/movimientos"), respaldoSnap.val());
+          }
+          await window.update(window.ref(`/historial/${id}`), { eliminado: true });
+          await window.remove(window.ref(`/respaldoZ/${id}`));
+          loadMovimientos();
+          loadHistorial();
+        });
+      });
+    }
+
+    // --- ELIMINAR AUTOMÁTICO DE RESPALDO Z VENCIDO ---
+    if (expirada) {
+      await window.remove(window.ref(`/respaldoZ/${id}`));
+    }
+
+    tablaHistorial.appendChild(tr);
+  }
+}
+
+  
+// --- STOCK ---
+const stockCodigo = document.getElementById("stock-codigo");
+const stockCantidad = document.getElementById("stock-cantidad");
+const btnAgregarStock = document.getElementById("agregar-stock");
+const btnBuscarStock = document.getElementById("buscar-stock");
+const tablaStock = document.getElementById("tabla-stock").querySelector("tbody");
+const btnStockDecr = document.getElementById("stock-btn-decr");
+const btnStockIncr = document.getElementById("stock-btn-incr");
+
+// Cargar opciones 1 a 999 si el input es un <select>
+if (stockCantidad.tagName === "SELECT") {
+  stockCantidad.innerHTML = "";
+  for (let i = 1; i <= 999; i++) {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = i;
+    stockCantidad.appendChild(opt);
+  }
+}
+
+// Actualiza cantidad (0–999)
+function actualizarCant(delta, inputElement) {
+  let val = parseInt(inputElement.value) || 0;
+  val = Math.min(999, Math.max(0, val + delta));
+  inputElement.value = val;
+}
+
+if (btnStockDecr) btnStockDecr.addEventListener("click", () => actualizarCant(-1, stockCantidad));
+if (btnStockIncr) btnStockIncr.addEventListener("click", () => actualizarCant(1, stockCantidad));
+
+// Formato fecha
+function formatFecha(iso) {
+  const d = new Date(iso);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${dd}/${mm}/${yyyy} (${hh}:${min})`;
+}
+
+// Formato precio "$00000,00"
+function formatPrecio(num) {
+  const entero = Math.floor(num);
+  const dec = Math.round((num - entero) * 100);
+  const entStr = String(entero).padStart(5, "0");
+  const decStr = String(dec).padStart(2, "0");
+  return `$${entStr},${decStr}`;
+}
+
+// Modal admin
+function showAdminActionModal(actionCallback) {
+  const modal = document.createElement("div");
+  modal.style.cssText = `
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    display:flex; justify-content:center; align-items:center;
+    background:rgba(0,0,0,0.7); z-index:9999;
+  `;
+  modal.innerHTML = `
+    <div style="background:#fff; padding:20px; border-radius:10px; width:300px; text-align:center;">
+      <h2>Contraseña Administrador</h2>
+      <input id="admin-pass-input" type="password" placeholder="Contraseña Admin" style="width:100%; margin:5px 0;">
+      <div style="margin-top:10px;">
+        <button id="admin-pass-aceptar" style="margin-right:5px;">Aceptar</button>
+        <button id="admin-pass-cancelar" style="background:red; color:#fff;">Cancelar</button>
+      </div>
+      <p id="admin-pass-msg" style="color:red; margin-top:5px;"></p>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const input = modal.querySelector("#admin-pass-input");
+  const aceptar = modal.querySelector("#admin-pass-aceptar");
+  const cancelar = modal.querySelector("#admin-pass-cancelar");
+  const msg = modal.querySelector("#admin-pass-msg");
+
+  cancelar.addEventListener("click", () => modal.remove());
+  aceptar.addEventListener("click", async () => {
+    const pass = input.value.trim();
+    const confSnap = await window.get(window.ref("/config"));
+    const confVal = confSnap.exists() ? confSnap.val() : {};
+    const passAdmin = confVal.passAdmin || "1918";
+    const masterPass = confVal.masterPass || "1409";
+    if (pass !== passAdmin && pass !== masterPass) {
+      msg.textContent = "Contraseña incorrecta";
       return;
     }
-    const refProd = window.ref(window.db, `stock/${codigo}`);
-    const snap = await window.get(refProd);
-    if (snap.exists()) {
-      const prod = snap.val();
-      await window.update(refProd, { cantidad: (Number(prod.cantidad) || 0) + cantidad, fecha: ahoraISO() });
-    } else {
-      await window.set(refProd, {
-        nombre: "PRODUCTO NUEVO",
-        cantidad,
-        precio: "00000,00",
-        fecha: ahoraISO()
-      });
-    }
-    inputStockCodigo.value = "";
+    modal.remove();
+    actionCallback();
   });
 }
 
-// === Botón BUSCAR STOCK ===
-if (btnBuscarStock) {
-  btnBuscarStock.addEventListener("click", async () => {
-    const termino = (inputStockCodigo.value || "").trim().toLowerCase();
-    if (!termino) return alert("Ingrese código o nombre a buscar");
-
-    const snap = await window.get(window.ref(window.db, "stock"));
-    if (!snap.exists()) return alert("No hay productos cargados");
-
-    const data = snap.val();
-    const resultados = Object.entries(data).filter(([codigo, prod]) => {
-      return codigo.toLowerCase().includes(termino) || (prod.nombre || "").toLowerCase().includes(termino);
-    });
-
-    if (resultados.length === 0) return alert("No se encontraron productos");
-
-    // Limpiar tabla y mostrar solo resultados
-    tablaStockBody.innerHTML = "";
-    resultados.forEach(([codigo, prod]) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(codigo)}</td>
-        <td>${escapeHtml(prod.nombre || "")}</td>
-        <td>${Number(prod.cantidad) || 0}</td>
-        <td>${prod.fecha ? formatoFechaIsoToDisplay(prod.fecha) : ""}</td>
-        <td>${typeof prod.precio === "number" ? formatoPrecioParaPantalla(prod.precio) : ('$' + String(prod.precio || "").replace('.',','))}</td>
-        <td>
-          <button class="btn-edit-stock" data-id="${codigo}">✏️</button>
-          <button class="btn-del-stock" data-id="${codigo}">❌</button>
-        </td>
-      `;
-      tablaStockBody.appendChild(tr);
-    });
-
-    // Reasignar eventos a botones dentro de los resultados
-    document.querySelectorAll(".btn-del-stock").forEach(btn => {
-      btn.onclick = () => {
-        requireAdminConfirm(async () => {
-          await window.remove(window.ref(window.db, `stock/${btn.dataset.id}`));
-        });
-      };
-    });
-    document.querySelectorAll(".btn-edit-stock").forEach(btn => {
-      btn.onclick = () => requireAdminConfirm(() => editarStockModal(btn.dataset.id));
-    });
-  });
-}
-
-// === Función para editar producto ===
-function editarStockModal(codigo) {
-  (async () => {
-    const snap = await window.get(window.ref(window.db, `stock/${codigo}`));
-    if (!snap.exists()) return alert("Producto no encontrado");
-    const prod = snap.val();
-    mostrarModal(`
-      <h3>Editar Producto</h3>
-      <label>Nombre</label><input id="__edit_nombre" value="${escapeHtml(prod.nombre || "")}">
-      <label>Precio (00000,00)</label><input id="__edit_precio" value="${escapeHtml(String(prod.precio || "00000,00"))}">
-      <label>Cantidad</label><input id="__edit_cantidad" type="number" value="${Number(prod.cantidad) || 0}">
-      <div style="margin-top:10px">
-        <button id="__save_prod">✅Guardar</button>
-        <button id="__cancel_prod">❌Cancelar</button>
-      </div>
-    `);
-    document.getElementById("__cancel_prod").onclick = cerrarModal;
-    document.getElementById("__save_prod").onclick = async () => {
-      const nombre = (document.getElementById("__edit_nombre").value || "").trim();
-      const precio = (document.getElementById("__edit_precio").value || "").trim();
-      const cantidadVal = safeNumber(document.getElementById("__edit_cantidad").value);
-      if (!/^\d{1,5},\d{2}$/.test(precio)) {
-        alert("Precio inválido. Formato: 00000,00");
-        return;
-      }
-      await window.update(window.ref(window.db, `stock/${codigo}`), {
-        nombre: nombre || "PRODUCTO NUEVO",
-        precio: precio,
-        cantidad: cantidadVal,
-        fecha: ahoraISO()
-      });
-      cerrarModal();
-    };
-  })();
-}
-
-// -----------------------
-// SUELTOS
-// -----------------------
-const tablaSueltosBody = document.querySelector("#tabla-sueltos tbody");
-const inputSueltoCodigo = document.getElementById("sueltos-codigo");
-const inputKgSuelto = document.getElementById("sueltos-kg");
-const btnAgregarSuelto = document.getElementById("btn-agregar-suelto");
-const btnBuscarSuelto = document.getElementById("btn-buscar-suelto");
-const btnIncrKg = document.getElementById("sueltos-btn-incr");
-const btnDecrKg = document.getElementById("sueltos-btn-decr");
-
-// Escuchar cambios en sueltos y renderizar tabla
-window.onValue(window.ref(window.db, "sueltos"), snap => {
-  if (!tablaSueltosBody) return;
-  tablaSueltosBody.innerHTML = "";
+// Cargar stock
+async function loadStock(filtro = "") {
+  const snap = await window.get(window.ref("/stock"));
+  tablaStock.innerHTML = "";
   if (!snap.exists()) return;
 
-  const data = snap.val();
-  const ordenados = Object.entries(data).sort(([, a], [, b]) => {
-    const ta = a.fecha ? new Date(a.fecha).getTime() : 0;
-    const tb = b.fecha ? new Date(b.fecha).getTime() : 0;
-    return tb - ta;
+  let stockArray = Object.entries(snap.val()).filter(([id, prod]) => {
+    if (!filtro) return true;
+    filtro = filtro.toLowerCase();
+    return id.toLowerCase().includes(filtro) || prod.nombre.toLowerCase().includes(filtro);
   });
 
-  ordenados.forEach(([codigo, prod]) => {
-    const kgDisplay = Number(prod.kg || 0).toFixed(3);
+  stockArray.sort((a, b) => new Date(b[1].fecha || 0) - new Date(a[1].fecha || 0));
+
+  stockArray.forEach(([id, prod]) => {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${escapeHtml(codigo)}</td>
-      <td>${escapeHtml(prod.nombre || "")}</td>
-      <td>${Number(prod.kg).toFixed(3)}</td>
-      <td>${prod.fecha ? formatoFechaIsoToDisplay(prod.fecha) : ""}</td>
-      <td>${typeof prod.precio === "number" ? formatoPrecioParaPantalla(prod.precio) : ('$' + String(prod.precio || "").replace('.',','))}</td>
+      <td>${id}</td>
+      <td>${prod.nombre}</td>
+      <td>${prod.cant}</td>
+      <td>${prod.fecha ? formatFecha(prod.fecha) : ""}</td>
+      <td>${formatPrecio(prod.precio)}</td>
       <td>
-        <button class="btn-edit-suelto" data-id="${codigo}">✏️</button>
-        <button class="btn-del-suelto" data-id="${codigo}">❌</button>
+        <button data-edit-id="${id}">✏️</button>
+        <button data-del-id="${id}">❌</button>
       </td>
     `;
-    tablaSueltosBody.appendChild(tr);
-  });
 
-  // Botones eliminar
-  document.querySelectorAll(".btn-del-suelto").forEach(btn => {
-    btn.onclick = () => requireAdminConfirm(async () => {
-      await window.remove(window.ref(window.db, `sueltos/${btn.dataset.id}`));
+    // Eliminar
+    tr.querySelector(`button[data-del-id="${id}"]`).addEventListener("click", () => {
+      showAdminActionModal(async () => {
+        await window.remove(window.ref(`/stock/${id}`));
+        loadStock();
+        loadProductos();
+      });
     });
+
+    // Editar
+    tr.querySelector(`button[data-edit-id="${id}"]`).addEventListener("click", () => {
+      showAdminActionModal(() => {
+        const modal = document.createElement("div");
+        modal.style.cssText = `
+          position:fixed; top:0; left:0; width:100%; height:100%;
+          display:flex; justify-content:center; align-items:center;
+          background:rgba(0,0,0,0.7); z-index:9999;
+        `;
+
+        const enteroInicial = Math.floor(prod.precio);
+        const centavosInicial = Math.round((prod.precio - enteroInicial) * 100).toString().padStart(2, "0");
+
+        modal.innerHTML = `
+          <div style="background:#fff; padding:20px; border-radius:10px; width:340px; text-align:center;">
+            <h2>Editar Stock ${id}</h2>
+
+            <label>Nombre</label>
+            <input id="edit-nombre" type="text" value="${prod.nombre}" style="width:100%; margin:5px 0;">
+
+            <label>Cantidad (0-999)</label>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin:5px 0;">
+              <button id="cant-decr" style="width:30%;">-</button>
+              <input id="edit-cant" type="number" min="0" max="999" value="${prod.cant}" style="width:40%; text-align:center;">
+              <button id="cant-incr" style="width:30%;">+</button>
+            </div>
+
+            <label>Precio</label>
+            <div style="display:flex; gap:6px; justify-content:center; align-items:center; margin-top:5px;">
+              <input id="edit-precio" type="text" placeholder="" style="width:65%; text-align:center;" value="${enteroInicial}">
+              <span>,</span>
+              <input id="edit-centavos" type="number" min="0" max="99" placeholder="00" style="width:25%; text-align:center;" value="${centavosInicial}">
+            </div>
+
+            <p id="preview-precio" style="margin-top:6px; font-weight:bold;">${formatPrecio(prod.precio)}</p>
+            <p id="edit-msg" style="color:red; min-height:18px; margin-top:5px;"></p>
+
+            <div style="margin-top:10px;">
+              <button id="edit-aceptar" style="margin-right:5px;">Aceptar</button>
+              <button id="edit-cancelar" style="background:red; color:#fff;">Cancelar</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+
+        const editNombre = modal.querySelector("#edit-nombre");
+        const editCant = modal.querySelector("#edit-cant");
+        const editPrecio = modal.querySelector("#edit-precio");
+        const editCentavos = modal.querySelector("#edit-centavos");
+        const editAceptar = modal.querySelector("#edit-aceptar");
+        const editCancelar = modal.querySelector("#edit-cancelar");
+        const editMsg = modal.querySelector("#edit-msg");
+        const preview = modal.querySelector("#preview-precio");
+        const cantDecr = modal.querySelector("#cant-decr");
+        const cantIncr = modal.querySelector("#cant-incr");
+
+        // Cantidad
+        cantDecr.addEventListener("click", () => actualizarCant(-1, editCant));
+        cantIncr.addEventListener("click", () => actualizarCant(1, editCant));
+
+        // Precio tipo KG
+        function formatearPrecioModal(inputElement) {
+          let raw = inputElement.value.replace(/\D/g, "");
+          if (raw.length > 7) raw = raw.slice(0, 7);
+          inputElement.value = raw; // solo número crudo
+          actualizarPreview();
+        }
+        editPrecio.addEventListener("input", () => formatearPrecioModal(editPrecio));
+        editCentavos.addEventListener("input", () => {
+          let val = parseInt(editCentavos.value);
+          if (isNaN(val) || val < 0) val = 0;
+          if (val > 99) val = 99;
+          editCentavos.value = val.toString().padStart(2, "0");
+          actualizarPreview();
+        });
+        function actualizarPreview() {
+          const entero = parseInt(editPrecio.value) || 0;
+          const dec = parseInt(editCentavos.value) || 0;
+          preview.textContent = formatPrecio(entero + dec / 100);
+        }
+
+        editCancelar.addEventListener("click", () => modal.remove());
+        editAceptar.addEventListener("click", async () => {
+          const newNombre = editNombre.value.trim();
+          const newCant = parseInt(editCant.value) || 0;
+          const entero = parseInt(editPrecio.value) || 0;
+          const dec = parseInt(editCentavos.value) || 0;
+          const newPrecio = entero + dec / 100;
+
+          if (!newNombre || newCant < 0 || newCant > 999) {
+            editMsg.textContent = "Campos obligatorios o cantidad inválida";
+            return;
+          }
+
+          await window.update(window.ref(`/stock/${id}`), {
+            nombre: newNombre,
+            cant: newCant,
+            precio: newPrecio,
+          });
+
+          loadStock();
+          loadProductos();
+          modal.remove();
+        });
+      });
+    });
+
+    tablaStock.appendChild(tr);
   });
+}
 
-  // Botones editar
-  document.querySelectorAll(".btn-edit-suelto").forEach(btn => {
-    btn.onclick = () => requireAdminConfirm(() => editarSueltoModal(btn.dataset.id));
-  });
-});
+// Agregar stock
+btnAgregarStock.addEventListener("click", async () => {
+  const codigo = stockCodigo.value.trim();
+  const cant = parseInt(stockCantidad.value);
+  if (!codigo || isNaN(cant) || cant <= 0) return;
 
-// === Botón agregar o sumar suelto ===
-btnAgregarSuelto.onclick = async () => {
-  const codigo = (inputSueltoCodigo.value || "").trim();
-  if (!codigo) return alert("Ingrese código");
-
-  const refProd = window.ref(window.db, `sueltos/${codigo}`);
-  const snap = await window.get(refProd);
-
-  let kgVal = Number(inputKgSuelto.value);
-  if (kgVal < 0) kgVal = 0;
-  if (kgVal > 99.9) kgVal = 99.9;
+  const snap = await window.get(window.ref(`/stock/${codigo}`));
+  const fecha = new Date().toISOString();
 
   if (snap.exists()) {
-    // Sumar KG al producto existente
-    const prod = snap.val();
-    const nuevoKg = Math.min(99.9, Number(prod.kg || 0) + kgVal);
-    await window.update(refProd, { kg: Number(nuevoKg.toFixed(3)), fecha: ahoraISO() });
+    const currentCant = parseInt(snap.val().cant) || 0;
+    const newCant = Math.min(999, currentCant + cant);
+    await window.update(window.ref(`/stock/${codigo}`), { cant: newCant, fecha });
   } else {
-    // Crear producto nuevo
-    await window.set(refProd, {
-      nombre: "PRODUCTO NUEVO",
-      precio: "00000,00",
-      kg: Number(kgVal.toFixed(3)),
-      fecha: ahoraISO()
+    await window.set(window.ref(`/stock/${codigo}`), {
+      nombre: "NUEVO",
+      cant: Math.min(999, cant),
+      fecha,
+      precio: 0.0,
     });
   }
 
-  inputSueltoCodigo.value = "";
-  inputKgSuelto.value = "0.000";
-};
-
-// === Botones fila de + / - KG (para el input de nuevo suelto) ===
-btnIncrKg.onclick = () => {
-  let val = Number(inputKgSuelto.value);
-  inputKgSuelto.value = Math.min(99.9, val + 0.1).toFixed(3);
-};
-
-btnDecrKg.onclick = () => {
-  let val = Number(inputKgSuelto.value);
-  inputKgSuelto.value = Math.max(0, val - 0.1).toFixed(3);
-};
-
-// === Botón BUSCAR SUELTOS ===
-btnBuscarSuelto.onclick = async () => {
-  const termino = (inputSueltoCodigo.value || "").trim().toLowerCase();
-  if (!termino) return alert("Ingrese código o nombre a buscar");
-
-  const snap = await window.get(window.ref(window.db, "sueltos"));
-  if (!snap.exists()) return alert("No hay productos cargados");
-
-  const data = snap.val();
-  const resultados = Object.entries(data).filter(([codigo, prod]) => {
-    return codigo.toLowerCase().includes(termino) || (prod.nombre || "").toLowerCase().includes(termino);
-  });
-
-  if (resultados.length === 0) return alert("No se encontraron productos");
-
-  tablaSueltosBody.innerHTML = "";
-  resultados.forEach(([codigo, prod]) => {
-    const kgDisplay = Number(prod.kg || 0).toFixed(3);
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${escapeHtml(codigo)}</td>
-      <td>${escapeHtml(prod.nombre || "")}</td>
-      <td>
-        <input type="text" class="input-kg" data-id="${codigo}" value="${kgDisplay}" readonly>
-      </td>
-      <td>${prod.fecha ? formatoFechaIsoToDisplay(prod.fecha) : ""}</td>
-      <td>${typeof prod.precio === "number" ? formatoPrecioParaPantalla(prod.precio) : ('$' + String(prod.precio || "").replace('.',','))}</td>
-      <td>
-        <button class="btn-edit-suelto" data-id="${codigo}">✏️</button>
-        <button class="btn-del-suelto" data-id="${codigo}">❌</button>
-      </td>
-    `;
-    tablaSueltosBody.appendChild(tr);
-  });
-};
-
-// === Función para editar SUELTO ===
-function editarSueltoModal(codigo) {
-  (async () => {
-    const snap = await window.get(window.ref(window.db, `sueltos/${codigo}`));
-    if (!snap.exists()) return alert("Producto no encontrado");
-    const prod = snap.val();
-
-    mostrarModal(`
-      <h3>Editar Producto</h3>
-      <label>Nombre</label><input id="__edit_suelto_nombre" value="${escapeHtml(prod.nombre || "")}">
-      <label>Precio (00000,00)</label><input id="__edit_suelto_precio" value="${escapeHtml(String(prod.precio || "00000,00"))}">
-      <label>KG</label><input id="__edit_suelto_kg" type="text" value="${Number(prod.kg || 0).toFixed(3)}">
-      <div style="margin-top:10px">
-        <button id="__save_suelto">✅Guardar</button>
-        <button id="__cancel_suelto">❌Cancelar</button>
-      </div>
-    `);
-
-    document.getElementById("__cancel_suelto").onclick = cerrarModal;
-    document.getElementById("__save_suelto").onclick = async () => {
-      const nombre = (document.getElementById("__edit_suelto_nombre").value || "").trim();
-      const precio = (document.getElementById("__edit_suelto_precio").value || "").trim();
-      let kgVal = safeNumber(document.getElementById("__edit_suelto_kg").value.replace(",", "."));
-      if (kgVal < 0) kgVal = 0;
-      if (kgVal > 99.9) kgVal = 99.9;
-
-      if (!/^\d{1,5},\d{2}$/.test(precio)) {
-        alert("Precio inválido. Formato: 00000,00");
-        return;
-      }
-
-      await window.update(window.ref(window.db, `sueltos/${codigo}`), {
-        nombre: nombre || "PRODUCTO NUEVO",
-        precio: precio,
-        kg: Number(kgVal.toFixed(3)),
-        fecha: ahoraISO()
-      });
-      cerrarModal();
-    };
-  })();
-}
-
-  // -----------------------
-  // CAJEROS
-  // -----------------------
-  window.onValue(window.ref(window.db, "cajeros"), snap => {
-    cajerosCache = {};
-    if (tablaCajerosBody) tablaCajerosBody.innerHTML = "";
-    // limpiar y añadir TODOS + cargar filtroCajero
-    if (filtroCajero) {
-      filtroCajero.innerHTML = `<option value="TODOS">TODOS</option>`;
-    }
-    if (!snap.exists()) return;
-    const data = snap.val();
-    // convertir data a array y ordenar por número
-const cajerosOrdenados = Object.entries(data).sort(([a], [b]) => {
-  return parseInt(a, 10) - parseInt(b, 10);
+  loadStock();
+  loadProductos();
 });
 
-cajerosOrdenados.forEach(([nro, caj]) => {
-  cajerosCache[nro] = caj;
-
-  // tabla cajeros
-  if (tablaCajerosBody) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${escapeHtml(nro)}</td>
-      <td>${escapeHtml(caj.nombre || "")}</td>
-      <td>${escapeHtml(caj.dni || "")}</td>
-      <td>
-        <button class="btn-edit-caj" data-id="${nro}">✏️</button>
-        <button class="btn-del-caj" data-id="${nro}">❌</button>
-      </td>
-    `;
-    tablaCajerosBody.appendChild(tr);
-  }
-
-  // filtroCajero option
-  if (filtroCajero) {
-    const opt = document.createElement("option");
-    opt.value = nro;
-    opt.textContent = `${nro} - ${caj.nombre || ""}`;
-    filtroCajero.appendChild(opt);
-  }
+// Buscar stock
+btnBuscarStock.addEventListener("click", () => {
+  const filtro = stockCodigo.value.trim();
+  loadStock(filtro);
 });
 
-    // attach events to cajeros table actions
-    document.querySelectorAll(".btn-del-caj").forEach(btn => {
-      btn.onclick = () => {
-        requireAdminConfirm(async () => {
-          await window.remove(window.ref(window.db, `cajeros/${btn.dataset.id}`));
-        });
-      };
-    });
-    document.querySelectorAll(".btn-edit-caj").forEach(btn => {
-      btn.onclick = () => requireAdminConfirm(() => editarCajeroModal(btn.dataset.id));
-    });
-  });
-
- if (btnAgregarCajero) {
-  btnAgregarCajero.addEventListener("click", () => {
-    requireAdminConfirm(async () => {
-      const nro = (cajeroNroSelect.value || "").trim();
-      const nombre = (inputCajeroNombre.value || "").trim();
-      const dni = (inputCajeroDni.value || "").trim();
-      const pass = (inputCajeroPass.value || "").trim();
-
-      if (!nombre || !dni || !pass) {
-        alert("Complete todos los campos");
-        return;
-      }
-      if (!/^\d{8}$/.test(dni)) {
-        alert("DNI inválido (debe tener 8 dígitos numéricos)");
-        return;
-      }
-
-      try {
-        await window.set(window.ref(window.db, `cajeros/${nro}`), { nro, nombre, dni, pass });
-        cajerosCache[nro] = { nro, nombre, dni, pass }; // actualizar cache
-        inputCajeroNombre.value = "";
-        inputCajeroDni.value = "";
-        inputCajeroPass.value = "";
-        alert("✔️ Cajero agregado ✔️");
-      } catch (err) {
-        alert("Error al agregar cajero: " + err);
-      }
-    });
-  });
-}
-
-  function editarCajeroModal(nro) {
-    (async () => {
-      const snap = await window.get(window.ref(window.db, `cajeros/${nro}`));
-      if (!snap.exists()) return;
-      const caj = snap.val();
-      mostrarModal(`
-        <h3>Editar Cajero</h3>
-        <label>Nombre</label><input id="__edit_caj_nombre" value="${escapeHtml(caj.nombre || "")}">
-        <label>DNI</label><input id="__edit_caj_dni" value="${escapeHtml(caj.dni || "")}">
-        <label>Pass</label><input id="__edit_caj_pass" value="${escapeHtml(caj.pass || "")}">
-        <div style="margin-top:10px">
-          <button id="__save_caj">✅Guardar</button>
-          <button id="__cancel_caj">❌Cancelar</button>
-        </div>
-      `);
-      document.getElementById("__cancel_caj").onclick = cerrarModal;
-      document.getElementById("__save_caj").onclick = async () => {
-        const nombre = (document.getElementById("__edit_caj_nombre").value || "").trim();
-        const dni = (document.getElementById("__edit_caj_dni").value || "").trim();
-        const pass = (document.getElementById("__edit_caj_pass").value || "").trim();
-        if (!/^\d{8}$/.test(dni)) {
-          alert("DNI inválido (8 dígitos)");
-          return;
-        }
-        await window.update(window.ref(window.db, `cajeros/${nro}`), { nombre, dni, pass });
-        cerrarModal();
-      };
-    })();
-  }
-
-  // -----------------------
-  // MOVIMIENTOS (render + filtro)
-  // -----------------------
-  // listen movimientos (cache)
-  window.onValue(window.ref(window.db, "movimientos"), snap => {
-    movimientosCache = snap.exists() ? snap.val() : {};
-    renderMovimientos();
-  });
-
-  // filtro change
-  if (filtroCajero) {
-    filtroCajero.addEventListener("change", () => renderMovimientos());
-  }
-
-  function renderMovimientos() {
-    if (!tablaMovimientosBody) return;
-    tablaMovimientosBody.innerHTML = "";
-    const dataArr = Object.values(movimientosCache || {});
-    const filtro = (filtroCajero && filtroCajero.value) ? filtroCajero.value : "TODOS";
-    const filtrados = filtro === "TODOS" ? dataArr : dataArr.filter(m => (m.cajero || "") === filtro);
-
-    // sort by fecha desc (newer first) if fecha exists
-    filtrados.sort((a, b) => {
-      const ta = a.fecha ? new Date(a.fecha).getTime() : 0;
-      const tb = b.fecha ? new Date(b.fecha).getTime() : 0;
-      return tb - ta;
-    });
-
-    filtrados.forEach(mov => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(mov.id)}</td>
-        <td>${formatoPrecioParaPantalla(mov.total)}</td>
-        <td>${escapeHtml(mov.tipo)}</td>
-        <td>
-          <button class="btn-ver-mov" data-id="${mov.id}">🧾</button>
-          <button class="btn-del-mov" data-id="${mov.id}">❌</button>
-        </td>
-      `;
-      tablaMovimientosBody.appendChild(tr);
-    });
-
-// =======================
-// BOTÓN ELIMINAR MOVIMIENTO
-// =======================
-document.querySelectorAll(".btn-del-mov").forEach(btn => {
-  btn.onclick = () => requireAdminConfirm(async () => {
-    const movRef = window.ref(window.db, `movimientos/${btn.dataset.id}`);
-    const snap = await window.get(movRef);
-    if (!snap.exists()) return;
-
-    const mov = snap.val();
-
-    if (mov.items && Array.isArray(mov.items)) {
-      for (const item of mov.items) {
-        if (item.tipo === "suelto") {
-          // Restaurar sueltos
-          const refSuelto = window.ref(window.db, `sueltos/${item.codigo}`);
-          const snapSuelto = await window.get(refSuelto);
-          if (snapSuelto.exists()) {
-            const prod = snapSuelto.val();
-            await window.update(refSuelto, { kg: Number((prod.kg || 0) + Number(item.cantidad)).toFixed(3), fecha: ahoraISO() });
-          } else {
-            await window.set(refSuelto, {
-              nombre: item.nombre || "PRODUCTO NUEVO",
-              precio: item.precio || "00000,00",
-              kg: Number(item.cantidad).toFixed(3),
-              fecha: ahoraISO()
-            });
-          }
-        } else {
-          // Restaurar stock normal
-          const stockRef = window.ref(window.db, `stock/${item.codigo}`);
-          const stockSnap = await window.get(stockRef);
-          if (stockSnap.exists()) {
-            const prod = stockSnap.val();
-            await window.update(stockRef, { cantidad: (Number(prod.cantidad || 0) + Number(item.cantidad)), fecha: ahoraISO() });
-          } else {
-            await window.set(stockRef, {
-              codigo: item.codigo,
-              nombre: item.nombre || "PRODUCTO NUEVO",
-              cantidad: Number(item.cantidad),
-              precio: item.precio || "00000,00",
-              fecha: ahoraISO()
-            });
-          }
-        }
-      }
-    }
-
-    // Finalmente eliminar el movimiento
-    await window.remove(movRef);
-    console.log(`Movimiento ${btn.dataset.id} eliminado y stock/sueltos restaurados correctamente`);
-  });
-});
-
-    document.querySelectorAll(".btn-ver-mov").forEach(btn => {
-      btn.onclick = () => verMovimientoModal(btn.dataset.id);
-    });
-  }
-
-  function verMovimientoModal(id) {
-    (async () => {
-      const snap = await window.get(window.ref(window.db, `movimientos/${id}`));
-      if (!snap.exists()) return alert("⛔Movimiento no encontrado⛔");
-      const mov = snap.val();
-      let html = `<p id="texto-ticket-modal">Ticket ${mov.id}</p>`;
-      html += `<p id="texto-ticket-modal">${formatFechaParaHeader(mov.fecha)}</p>`;
-      html += `<p id="texto-ticket-modal">Cajero: ${escapeHtml(mov.cajero)}</p>`;
-      (mov.items || []).forEach(it => {
-        html += `==================== <p id="texto-ticket-modal">${escapeHtml(it.nombre)} </p><span class="linea"></span><p id="texto-ticket-modal">${formatoPrecioParaPantalla(it.precio)} (x${it.cantidad}) = ${formatoPrecioParaPantalla(it.precio * it.cantidad)}</p>`;
-      });
-      html += `==================== <p id="texto-ticket-modal"><b>TOTAL: ${formatoPrecioParaPantalla(mov.total)}</b></p><p id="texto-ticket-modal">Pago en: ${escapeHtml(mov.tipo)}</p>`;
-      html += `<div style="margin-top:10px"><button id="__print_copy">🧾​​Imprimir</button><button id="__close_mov">❌Cancelar</button></div>`;
-      mostrarModal(html);
-      document.getElementById("__close_mov").onclick = cerrarModal;
-      document.getElementById("__print_copy").onclick = () => imprimirTicketMov(mov);
-    })();
-  }
-
-function imprimirTicketMov(mov) {
-  const itemsPerPage = 9999;
-  const items = mov.items || [];
-  const totalParts = Math.max(1, Math.ceil(items.length / itemsPerPage));
-  const printAreas = [];
-
-  // 🔥 Forzar lectura del nombre de la tienda en el momento de imprimir
-  let shopName = "Polirubro Todito"; // valor por defecto
-  try {
-    if (window.configCache && window.configCache.shopName) {
-      shopName = window.configCache.shopName.toUpperCase();
-    }
-  } catch (err) {
-    console.warn("No se pudo leer configCache, usando ZONAPC", err);
-  }
-
-  for (let p = 0; p < totalParts; p++) {
-    const slice = items.slice(p * itemsPerPage, (p + 1) * itemsPerPage);
-    const header = `
-      <div style="text-align:center">
-        <p id="texto-ticket">
-          ${escapeHtml(shopName)} <br>
-          ${mov.id} <br>
-          Nro - Cajero: ${escapeHtml(mov.cajero)} <br>
-          ${formatFechaParaHeader(mov.fecha)}
-        </p>
-      </div>
-    `;
-
-    let body = "";
-    slice.forEach(it => {
-      body += `
-        ==================== 
-        <p id="texto-ticket">
-          ${escapeHtml(it.nombre)} <br>
-          ${formatoPrecioParaPantalla(it.precio)} (x${it.cantidad}) = ${formatoPrecioParaPantalla(it.precio * it.cantidad)}
-        </p>
-      `;
-    });
-
-    const footer = `
-      ==================== 
-      <p id="texto-ticket"><b>TOTAL: ${formatoPrecioParaPantalla(mov.total)}</b></p>
-      <p id="texto-ticket">(Pago en: ${escapeHtml(mov.tipo)})</p>
-      <p id="texto-ticket">Ticket: </p><br>
-    `;
-
-    const area = document.createElement("div");
-    area.className = "print-area";
-    area.style.width = "5cm";
-    area.innerHTML = header + body + footer;
-    printAreas.push(area);
-  }
-
-  printAreas.forEach(a => document.body.appendChild(a));
-  window.print();
-  printAreas.forEach(a => document.body.removeChild(a));
-}
-
- // -----------------------
-// TIRAR Z (por cajero o TODOS)
-// -----------------------
-if (btnTirarZ) {
-  btnTirarZ.addEventListener("click", async () => {
-    // Abrir modal para pedir pass admin
-    mostrarModal(`
-      <h3>Confirme: Tirar Z</h3>
-      <p>Contraseña de Encargado: ¡No se podrá cancelar después de imprimir!</p>
-      <input id="z-pass" type="password" style="width:100%; margin:10px 0; padding:6px">
-      <div style="text-align:right">
-        <button id="z-cancel">❌Cancelar</button>
-        <button id="z-ok">✅Aceptar</button>
-      </div>
-    `);
-
-    document.getElementById("z-cancel").onclick = cerrarModal;
-    document.getElementById("z-ok").onclick = async () => {
-      const inputPass = document.getElementById("z-pass").value.trim();
-      const snapConfig = await window.get(window.ref(window.db, "config"));
-      const config = snapConfig.exists() ? snapConfig.val() : {};
-      const adminPass = config.passAdmin || "0123456789"; // por defecto
-
-      if (inputPass !== adminPass) {
-        alert("❌Contraseña incorrecta❌");
-        return;
-      }
-      cerrarModal();
-
-      // === Tirar Z real ===
-      const snap = await window.get(window.ref(window.db, "movimientos"));
-      if (!snap.exists()) return alert("❌No hay movimientos para tirar Z❌");
-      const allMovArr = Object.values(snap.val());
-      const cajSel = (filtroCajero && filtroCajero.value) ? filtroCajero.value : "TODOS";
-
-      let data = allMovArr;
-      if (cajSel !== "TODOS") {
-        data = allMovArr.filter(m => (m.cajero || "") === cajSel);
-        if (data.length === 0) return alert(`❌No hay movimientos para el cajero ${cajSel}❌`);
-      }
-
-      // group by cajero y tipo
-      const grouped = {};
-      data.forEach(m => {
-        const caj = m.cajero || "N/A";
-        if (!grouped[caj]) grouped[caj] = { Efectivo: [], Tarjeta: [], otros: [] };
-        if (m.tipo === "Efectivo") grouped[caj].Efectivo.push(m);
-        else if (m.tipo === "Tarjeta") grouped[caj].Tarjeta.push(m);
-        else grouped[caj].otros.push(m);
-      });
-
-      let html = `<h2>Reporte Z - ${new Date().toLocaleString()}</h2>`;
-      let grandTotal = 0;
-      const resumenZItems = [];
-
-      Object.keys(grouped).forEach(caj => {
-        html += `<h3>Cajero: ${caj}</h3><hr>`;
-        let totalEf = 0, totalTar = 0;
-
-        html += `<h4>Efectivo</h4>`;
-        grouped[caj].Efectivo.forEach(m => { 
-          html += `<p>ID ${m.id} - ${formatoPrecioParaPantalla(m.total)}</p>`;
-          totalEf += Number(m.total); 
-        });
-        html += `<p><b>Total Efectivo Cajero: ${formatoPrecioParaPantalla(totalEf)}</b></p>`;
-        html += `<hr><h4>Tarjeta</h4>`;
-        grouped[caj].Tarjeta.forEach(m => { 
-          html += `<p>ID ${m.id} - ${formatoPrecioParaPantalla(m.total)}</p>`;
-          totalTar += Number(m.total); 
-        });
-        html += `<p><b>Total Tarjeta Cajero: ${formatoPrecioParaPantalla(totalTar)}</b></p><hr>`;
-        html += `<p><b>Subtotal Cajero: ${formatoPrecioParaPantalla(totalEf + totalTar)}</b></p><hr>`;
-        grandTotal += totalEf + totalTar;
-
-        resumenZItems.push({
-          cajero: caj,
-          totalEfectivo: totalEf,
-          totalTarjeta: totalTar,
-          subtotal: totalEf + totalTar,
-          // 🔹 Guardamos también las ventas para la reimpresión detallada
-          ventasEfectivo: grouped[caj].Efectivo.map(m => ({ id: m.id, total: m.total })),
-          ventasTarjeta: grouped[caj].Tarjeta.map(m => ({ id: m.id, total: m.total }))
-        });
-      });
-
-      html += `<h2>Total General: ${formatoPrecioParaPantalla(grandTotal)}</h2>`;
-      html += `<br><table border="1" style="width:100%; margin-top:20px"><tr><th>Efectivo Cobrado</th><th>Firma Cajero</th><th>Firma Encargado</th></tr><tr><td></td><td></td><td></td></tr></table>`;
-      html += `<br><table border="1" style="width:100%; margin-top:10px"><tr><th>Tarjeta Cobrada</th><th>Firma Cajero</th><th>Firma Encargado</th></tr><tr><td></td><td></td><td></td></tr></table>`;
-
-      // Imprimir
-      const area = document.createElement("div");
-      area.className = "print-area";
-      area.style.width = "21cm";
-      area.innerHTML = html;
-      document.body.appendChild(area);
-      window.print();
-      document.body.removeChild(area);
-
-      // === Guardar copia de Z en HISTORIAL (con detalles) ===
-      try {
-        const ahora = new Date();
-        const año = ahora.getFullYear();
-        const mes = String(ahora.getMonth() + 1).padStart(2, "0");
-        const idZ = "Z-" + ahora.getTime();
-        const path = `historial/${año}-${mes}/${idZ}`;
-
-        await window.set(window.ref(window.db, path), {
-          id: idZ,
-          tipo: "TIRAR Z",
-          cajero: cajSel,
-          total: grandTotal,
-          fecha: ahora.toISOString(),
-          items: resumenZItems
-        });
-      } catch (err) {
-        console.error("⛔Error guardando Z en historial:", err);
-      }
-
-      // Borrar movimientos
-      if (cajSel === "TODOS") {
-        await window.set(window.ref(window.db, "movimientos"), {});
-      } else {
-        const updates = {};
-        Object.values(snap.val()).forEach(m => {
-          if ((m.cajero || "") === cajSel) updates[m.id] = null;
-        });
-        await window.update(window.ref(window.db, "movimientos"), updates);
-      }
-
-      alert(`✔️Tirar Z completado para ${cajSel}✔️`);
-    };
-  });
-}
-
-// -----------------------
-// CONFIG
-// -----------------------
-window.onValue(window.ref(window.db, "config"), snap => {
-  if (!snap.exists()) return;
-  const conf = snap.val();
-  configCache = conf;
-
-  if (inputConfigNombre) inputConfigNombre.value = conf.shopName || "";
-
-  const appTitle = document.getElementById("app-title");
-  if (appTitle) {
-    appTitle.textContent = conf.shopName || "ZONAPC";
-  }
-});
-
-if (btnGuardarConfig) {
-  btnGuardarConfig.addEventListener("click", async () => {
-    const shopName = (inputConfigNombre.value || "").trim();
-    const actual = (inputConfigPassActual.value || "").trim();
-    const nueva = (inputConfigPassNueva.value || "").trim();
-
-    if (!actual || !nueva) return alert("⛔Complete los campos⛔");
-
-    const snap = await window.get(window.ref(window.db, "config"));
-    if (!snap.exists()) return alert("❌Error de lectura❌");
-
-    const conf = snap.val();
-    if (actual !== conf.passAdmin) return alert("❌Contraseña actual incorrecta❌");
-
-    if (nueva.length < 4 || nueva.length > 10) {
-      return alert("La nueva contraseña debe tener entre 4 y 10 caracteres");
-    }
-
-    // 🔥 preparar lo que se actualizará
-    const updateData = { passAdmin: nueva };
-    if (shopName) updateData.shopName = shopName;
-
-    await window.update(window.ref(window.db, "config"), updateData);
-
-    if (configMsg) configMsg.textContent = "Guardado con éxito ✅";
-
-    inputConfigPassActual.value = "";
-    inputConfigPassNueva.value = "";
-  });
-}
-btnRestaurar.onclick = async () => {
-  const v = (inputMasterPass.value || "").trim();
-  if (v === "9999") {
-    await window.update(window.ref(window.db, "config"), { passAdmin: "0123456789" });
-    configMsg.textContent = "Contraseña restaurada a 0123456789";
-  } else {
-    configMsg.textContent = "Contraseña administrativa incorrecta";
-  }
-};
-
-// -----------------------
-// HISTORIAL (render + acciones) - con paginación por DÍA + soporte TIRAR Z
-// -----------------------
-function cargarHistorial() {
-  const ahora = new Date();
-  const hoyDia = ahora.getDate();
-  let startYear = ahora.getFullYear();
-  let startMonthIndex;
-
-  if (hoyDia >= 15) {
-    startMonthIndex = ahora.getMonth();
-  } else {
-    startMonthIndex = ahora.getMonth() - 1;
-    if (startMonthIndex < 0) {
-      startMonthIndex = 11;
-      startYear--;
-    }
-  }
-
-  const startDate = new Date(startYear, startMonthIndex, 1);
-  const endDate = new Date(ahora.getFullYear(), ahora.getMonth(), ahora.getDate());
-
-  if (historialInfo) {
-    const meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
-    historialInfo.textContent = `Historial desde ${startDate.getDate()}/${String(startDate.getMonth()+1).padStart(2,"0")}/${startDate.getFullYear()} hasta ${endDate.getDate()}/${String(endDate.getMonth()+1).padStart(2,"0")}/${endDate.getFullYear()}`;
-  }
-
-  function toDateKey(d) {
-    return d.toISOString().slice(0,10);
-  }
-
-  const dayPages = [];
-  for (let d = new Date(startDate.getFullYear(), startDate.getMonth(), 1); d <= endDate; d.setDate(d.getDate() + 1)) {
-    dayPages.push(toDateKey(new Date(d)));
-  }
-
-  const tablaHistorialEl = document.getElementById("tabla-historial");
-  if (tablaHistorialEl && !document.getElementById("historial-paginador-top")) {
-    const pagTop = document.createElement("div");
-    pagTop.id = "historial-paginador-top";
-    pagTop.className = "historial-paginador";
-    pagTop.style.margin = "10px 0";
-    tablaHistorialEl.parentNode.insertBefore(pagTop, tablaHistorialEl);
-  }
-  if (tablaHistorialEl && !document.getElementById("historial-paginador-bottom")) {
-    const pagBottom = document.createElement("div");
-    pagBottom.id = "historial-paginador-bottom";
-    pagBottom.className = "historial-paginador";
-    pagBottom.style.margin = "10px 0";
-    tablaHistorialEl.parentNode.insertBefore(pagBottom, tablaHistorialEl.nextSibling);
-  }
-
-  const pagTopEl = document.getElementById("historial-paginador-top");
-  const pagBottomEl = document.getElementById("historial-paginador-bottom");
-
-  let monthsSnapshots = {};
-  let histByDay = {};
-  let movCache = {};
-  let currentIndex = dayPages.length - 1;
-
-  function formatoDiaReadable(dateKey) {
-    if (!dateKey) return "";
-    const d = new Date(dateKey + "T00:00:00");
-    const meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
-    const dd = d.getDate().toString().padStart(2, "0");
-    return `${dd} ${meses[d.getMonth()]} ${d.getFullYear()}`;
-  }
-
-  function rebuildFromSnapshots() {
-    histByDay = {};
-    movCache = {};
-    Object.entries(monthsSnapshots).forEach(([monthKey, dataset]) => {
-      if (!dataset) return;
-      Object.entries(dataset).forEach(([id, mov]) => {
-        if (!mov) return;
-        let dateKey = "";
-        try {
-          dateKey = mov.fecha ? (new Date(mov.fecha)).toISOString().slice(0,10) : (monthKey + "-01");
-        } catch (e) {
-          dateKey = monthKey + "-01";
-        }
-        if (!histByDay[dateKey]) histByDay[dateKey] = [];
-        histByDay[dateKey].push(mov);
-        movCache[mov.id] = { mov, monthKey };
-      });
-    });
-    Object.keys(histByDay).forEach(k => {
-      histByDay[k].sort((a,b) => {
-        const ta = a.fecha ? new Date(a.fecha).getTime() : 0;
-        const tb = b.fecha ? new Date(b.fecha).getTime() : 0;
-        return tb - ta;
-      });
-    });
-  }
-
-  function renderPaginators() {
-    const total = dayPages.length;
-    const currentLabel = formatoDiaReadable(dayPages[currentIndex]);
-
-    function buildHtml(prevDisabled, nextDisabled) {
-      return `
-        <div id="hist-pager" style="display:flex; justify-content:center; align-items:center; gap:10px;">
-          <button id="hist-prev" ${prevDisabled ? 'disabled' : ''} style="padding:6px 10px; border-radius:6px; cursor:pointer">◀ Anterior</button>
-          <div id="hist-dia-label" style="font-weight:bold; min-width:200px; text-align:center">${currentLabel}</div>
-          <button id="hist-next" ${nextDisabled ? 'disabled' : ''} style="padding:6px 10px; border-radius:6px; cursor:pointer">Siguiente ▶</button>
-        </div>
-      `;
-    }
-
-    const prevDisabled = currentIndex <= 0;
-    const nextDisabled = currentIndex >= total - 1;
-    if (pagTopEl) pagTopEl.innerHTML = buildHtml(prevDisabled, nextDisabled);
-    if (pagBottomEl) pagBottomEl.innerHTML = buildHtml(prevDisabled, nextDisabled);
-
-    ["historial-paginador-top", "historial-paginador-bottom"].forEach(pid => {
-      const container = document.getElementById(pid);
-      if (!container) return;
-      const prevBtn = container.querySelector("#hist-prev");
-      const nextBtn = container.querySelector("#hist-next");
-      if (prevBtn) prevBtn.onclick = () => { if (currentIndex > 0) { currentIndex--; renderDay(currentIndex); renderPaginators(); } };
-      if (nextBtn) nextBtn.onclick = () => { if (currentIndex < dayPages.length - 1) { currentIndex++; renderDay(currentIndex); renderPaginators(); } };
-    });
-  }
-
-  function renderDay(index) {
-    if (!tablaHistorialBody) return;
-    tablaHistorialBody.innerHTML = "";
-
-    const dateKey = dayPages[index];
-    const items = histByDay[dateKey] || [];
-
-    if (!items.length) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="6">No hay movimientos para ${formatoDiaReadable(dateKey)}</td>`;
-      tablaHistorialBody.appendChild(tr);
-      return;
-    }
-
-    items.forEach(mov => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${escapeHtml(mov.id)}</td>
-        <td>${formatoPrecioParaPantalla(mov.total)}</td>
-        <td>${escapeHtml(mov.tipo)}</td>
-        <td>${escapeHtml(mov.cajero || "")}</td>
-        <td>${formatFechaParaHeader(mov.fecha)}</td>
-        <td>
-          <button class="btn-ver-hist" data-id="${mov.id}">🧾​</button>
-        </td>
-      `;
-      tablaHistorialBody.appendChild(tr);
-    });
-
-    document.querySelectorAll(".btn-ver-hist").forEach(btn => {
-      btn.onclick = async () => {
-        const id = btn.dataset.id;
-        const item = movCache[id];
-        let mov = item ? item.mov : null;
-        if (!mov) {
-          const monthKey = (dateKey || "").slice(0,7);
-          const snapMov = await window.get(window.ref(window.db, `historial/${monthKey}/${id}`));
-          if (!snapMov.exists()) return alert("Movimiento no encontrado en historial");
-          mov = snapMov.val();
-        }
-
-        let html = `<h3>Ticket ${mov.id}</h3>`;
-        html += `<p>${formatFechaParaHeader(mov.fecha)}</p>`;
-        html += `<p>Cajero: ${escapeHtml(mov.cajero)}</p>==================== `;
-
-        if (mov.tipo === "TIRAR Z") {
-          // Mostrar datos del cierre Z
-          html += `<p><b>Corte Z</b></p>`;
-          html += `<p>Total del día: ${formatoPrecioParaPantalla(mov.total)}</p>`;
-          if (mov.detalle) {
-            html += `<hr><p>Detalle:</p>`;
-            Object.entries(mov.detalle).forEach(([k,v]) => {
-              html += `<p>${escapeHtml(k)}: ${formatoPrecioParaPantalla(v)}</p>`;
-            });
-          }
-          html += `<div style="margin-top:10px"><button id="__print_z_hist">Imprimir Corte Z</button><button id="__close_hist">Cerrar</button></div>`;
-        } else {
-          // Ticket de venta normal
-          (mov.items || []).forEach(it => {
-            html += `<p>${escapeHtml(it.nombre)} - ${it.cantidad} - ${formatoPrecioParaPantalla(it.precio)} - ${formatoPrecioParaPantalla(it.precio * it.cantidad)}</p>`;
-          });
-          html += `==================== <p><b>TOTAL: ${formatoPrecioParaPantalla(mov.total)}</b></p><p>Pago: ${escapeHtml(mov.tipo)}</p>`;
-          html += `<div style="margin-top:10px"><button id="__print_copy_hist">Imprimir Copia</button><button id="__close_hist">Cerrar</button></div>`;
-        }
-
-        mostrarModal(html);
-        const closeBtn = document.getElementById("__close_hist");
-        if (closeBtn) closeBtn.onclick = cerrarModal;
-        const printBtn = document.getElementById("__print_copy_hist");
-        if (printBtn) printBtn.onclick = () => imprimirTicketMov(mov);
-        const printZBtn = document.getElementById("__print_z_hist");
-        if (printZBtn) printZBtn.onclick = () => imprimirCorteZ(mov);
-      };
-    });
-  }
-
-  function buildMonthKeys(startD, endD) {
-    const keys = [];
-    const cur = new Date(startD.getFullYear(), startD.getMonth(), 1);
-    const last = new Date(endD.getFullYear(), endD.getMonth(), 1);
-    while (cur <= last) {
-      const k = `${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,"0")}`;
-      keys.push(k);
-      cur.setMonth(cur.getMonth() + 1);
-    }
-    return keys;
-  }
-
-  const monthKeys = buildMonthKeys(startDate, endDate);
-  monthKeys.forEach(monthKey => {
-    monthsSnapshots[monthKey] = null;
-    window.onValue(window.ref(window.db, `historial/${monthKey}`), snap => {
-      monthsSnapshots[monthKey] = snap.exists() ? snap.val() : null;
-      rebuildFromSnapshots();
-      if (currentIndex > dayPages.length - 1) currentIndex = dayPages.length - 1;
-      renderPaginators();
-      renderDay(currentIndex);
-    });
-  });
-
-  renderPaginators();
-  renderDay(currentIndex);
-}
-
-// iniciar carga historial
-cargarHistorial();
-
-/*****************************************************
- * Imprimir Corte Z (desde historial) — versión final mejorada con detalles de TIRAR Z
- *****************************************************/
-function imprimirCorteZ(mov) {
-  if (!mov || mov.tipo !== "TIRAR Z") {
-    alert("No hay datos válidos para imprimir Z");
+// Inicial
+loadStock();
+
+// --- SUELTOS ---
+const sueltosCodigo = document.getElementById("sueltos-codigo");
+const sueltosKg = document.getElementById("sueltos-kg");
+const btnAgregarSuelto = document.getElementById("btn-agregar-suelto");
+const btnBuscarSuelto = document.getElementById("btn-buscar-suelto");
+const tablaSueltos = document.getElementById("tabla-sueltos").querySelector("tbody");
+const btnSueltoDecr = document.getElementById("sueltos-btn-decr");
+const btnSueltoIncr = document.getElementById("sueltos-btn-incr");
+
+// Mensaje de error debajo del input sueltosKg
+let msgKg = document.createElement("p");
+msgKg.style.color = "red";
+msgKg.style.margin = "4px 0 0 0";
+msgKg.style.fontSize = "0.9em";
+sueltosKg.parentNode.appendChild(msgKg);
+
+// Formateo KG (funcional comprobado)
+function formatearKg(inputElement, msgElement, delta = 0) {
+  let raw = inputElement.value.replace(/\D/g, "");
+
+  if (delta !== 0) {
+    let val = parseFloat(inputElement.value) || 0;
+    val = Math.min(99.000, Math.max(0.000, val + delta));
+    inputElement.value = val.toFixed(3);
+    if (msgElement) msgElement.textContent = "";
     return;
   }
 
-  const fecha = new Date(mov.fecha || new Date()).toLocaleString();
-  const resumenZItems = mov.items || [];
-  const grandTotal = mov.total || 0;
+  let val;
+  switch (raw.length) {
+    case 0: val = 0.000; break;
+    case 1: val = parseFloat("0.00" + raw); break;
+    case 2: val = parseFloat("0.0" + raw); break;
+    case 3: val = parseFloat("0." + raw); break;
+    case 4: val = parseFloat(raw[0] + "." + raw.slice(1)); break;
+    case 5: val = parseFloat(raw.slice(0, 2) + "." + raw.slice(2, 5)); break;
+    default: val = parseFloat(raw.slice(0, 2) + "." + raw.slice(2, 5)); break;
+  }
 
-  let html = `
-    <h2 style="text-align:center">${mov.shopName || "ZONAPC"}</h2>
-    <h3 style="text-align:center">REIMPRESIÓN DE CORTE Z</h3>
-    <p style="text-align:center">${fecha}</p>
-    <hr>
+  if (isNaN(val) || val < 0 || val > 99) {
+    msgElement.textContent = "KG inválido: ejemplo 1.250 kg";
+    inputElement.value = "0.000";
+  } else {
+    inputElement.value = val.toFixed(3);
+    msgElement.textContent = "";
+  }
+}
+
+// Botones + y -
+btnSueltoIncr.addEventListener("click", () => formatearKg(sueltosKg, msgKg, 0.100));
+btnSueltoDecr.addEventListener("click", () => formatearKg(sueltosKg, msgKg, -0.100));
+
+// Edición manual con validación
+sueltosKg.addEventListener("input", () => formatearKg(sueltosKg, msgKg));
+sueltosKg.addEventListener("blur", () => formatearKg(sueltosKg, msgKg));
+
+// Fecha
+function formatFecha(iso) {
+  const d = new Date(iso);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${dd}/${mm}/${yyyy} (${hh}:${min})`;
+}
+
+// Precio "$00000,00"
+function formatPrecio(num) {
+  const entero = Math.floor(num);
+  const dec = Math.round((num - entero) * 100);
+  const entStr = String(entero).padStart(5, "0");
+  const decStr = String(dec).padStart(2, "0");
+  return `$${entStr},${decStr}`;
+}
+
+// Modal admin
+function showAdminActionModal(actionCallback) {
+  const modal = document.createElement("div");
+  modal.style.cssText = `
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    display:flex; justify-content:center; align-items:center;
+    background:rgba(0,0,0,0.7); z-index:9999;
   `;
+  modal.innerHTML = `
+    <div style="background:#fff; padding:20px; border-radius:10px; width:300px; text-align:center;">
+      <h2>Contraseña Administrador</h2>
+      <input id="admin-pass-input" type="password" placeholder="Contraseña Admin" style="width:100%; margin:5px 0;">
+      <div style="margin-top:10px;">
+        <button id="admin-pass-aceptar" style="margin-right:5px;">Aceptar</button>
+        <button id="admin-pass-cancelar" style="background:red; color:#fff;">Cancelar</button>
+      </div>
+      <p id="admin-pass-msg" style="color:red; margin-top:5px;"></p>
+    </div>
+  `;
+  document.body.appendChild(modal);
 
-  resumenZItems.forEach(item => {
-    html += `<h3>Cajero: ${item.cajero}</h3><hr>`;
+  const input = modal.querySelector("#admin-pass-input");
+  const aceptar = modal.querySelector("#admin-pass-aceptar");
+  const cancelar = modal.querySelector("#admin-pass-cancelar");
+  const msg = modal.querySelector("#admin-pass-msg");
 
-    // ===== Efectivo =====
-    html += `<h4>Efectivo</h4>`;
-    if (item.ventasEfectivo && item.ventasEfectivo.length > 0) {
-      item.ventasEfectivo.forEach(v => {
-        html += `<p>ID ${v.id} — ${formatoPrecioParaPantalla(v.total)}</p>`;
-      });
-    } else if (item.detallesEfectivo && item.detallesEfectivo.length > 0) {
-      // Compatibilidad con versiones anteriores
-      item.detallesEfectivo.forEach(v => {
-        html += `<p>ID ${v.id} — ${formatoPrecioParaPantalla(v.total)}</p>`;
-      });
-    } else {
-      html += `<p>(Sin ventas registradas en efectivo)</p>`;
+  cancelar.addEventListener("click", () => modal.remove());
+  aceptar.addEventListener("click", async () => {
+    const pass = input.value.trim();
+    const confSnap = await window.get(window.ref("/config"));
+    const confVal = confSnap.exists() ? confSnap.val() : {};
+    const passAdmin = confVal.passAdmin || "1918";
+    const masterPass = confVal.masterPass || "1409";
+    if (pass !== passAdmin && pass !== masterPass) {
+      msg.textContent = "Contraseña incorrecta";
+      return;
     }
-    html += `<p><b>Total Efectivo Cajero:</b> ${formatoPrecioParaPantalla(item.totalEfectivo || 0)}</p>`;
+    modal.remove();
+    actionCallback();
+  });
+}
 
-    // ===== Tarjeta =====
-    html += `<hr><h4>Tarjeta</h4>`;
-    if (item.ventasTarjeta && item.ventasTarjeta.length > 0) {
-      item.ventasTarjeta.forEach(v => {
-        html += `<p>ID ${v.id} — ${formatoPrecioParaPantalla(v.total)}</p>`;
-      });
-    } else if (item.detallesTarjeta && item.detallesTarjeta.length > 0) {
-      item.detallesTarjeta.forEach(v => {
-        html += `<p>ID ${v.id} — ${formatoPrecioParaPantalla(v.total)}</p>`;
-      });
-    } else {
-      html += `<p>(Sin ventas registradas con tarjeta)</p>`;
-    }
-    html += `<p><b>Total Tarjeta Cajero:</b> ${formatoPrecioParaPantalla(item.totalTarjeta || 0)}</p><hr>`;
+// Cargar sueltos
+async function loadSueltos(filtro = "") {
+  const snap = await window.get(window.ref("/sueltos"));
+  tablaSueltos.innerHTML = "";
+  if (!snap.exists()) return;
 
-    // ===== Subtotal =====
-    html += `<p><b>Subtotal Cajero:</b> ${formatoPrecioParaPantalla(item.subtotal || 0)}</p><hr>`;
+  let sueltosArray = Object.entries(snap.val()).filter(([id, prod]) => {
+    if (!filtro) return true;
+    filtro = filtro.toLowerCase();
+    return id.toLowerCase().includes(filtro) || prod.nombre.toLowerCase().includes(filtro);
   });
 
-  // ===== Total General =====
-  html += `
-    <h2>Total General: ${formatoPrecioParaPantalla(grandTotal)}</h2>
-    <br>
-    <table border="1" style="width:100%; margin-top:20px">
-      <tr><th>Efectivo Cobrado</th><th>Firma Cajero</th><th>Firma Encargado</th></tr>
-      <tr><td></td><td></td><td></td></tr>
-    </table>
-    <br>
-    <table border="1" style="width:100%; margin-top:10px">
-      <tr><th>Tarjeta Cobrada</th><th>Firma Cajero</th><th>Firma Encargado</th></tr>
-      <tr><td></td><td></td><td></td></tr>
-    </table>
-    <p style="text-align:center; margin-top:20px">Reimpresión de Corte Z</p>
-    <p style="text-align:center">Gracias por usar ZONAPC</p>
+  sueltosArray.sort((a, b) => new Date(b[1].fecha || 0) - new Date(a[1].fecha || 0));
+
+  sueltosArray.forEach(([id, prod]) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${id}</td>
+      <td>${prod.nombre}</td>
+      <td>${parseFloat(prod.kg).toFixed(3)}</td>
+      <td>${prod.fecha ? formatFecha(prod.fecha) : ""}</td>
+      <td>${formatPrecio(prod.precio)}</td>
+      <td>
+        <button data-edit-id="${id}">✏️</button>
+        <button data-del-id="${id}">❌</button>
+      </td>
+    `;
+
+    // Eliminar
+    tr.querySelector(`button[data-del-id="${id}"]`).addEventListener("click", () => {
+      showAdminActionModal(async () => {
+        await window.remove(window.ref(`/sueltos/${id}`));
+        loadSueltos();
+        loadProductos();
+      });
+    });
+
+    // Editar
+    tr.querySelector(`button[data-edit-id="${id}"]`).addEventListener("click", () => {
+      showAdminActionModal(() => {
+        const modal = document.createElement("div");
+        modal.style.cssText = `
+          position:fixed; top:0; left:0; width:100%; height:100%;
+          display:flex; justify-content:center; align-items:center;
+          background:rgba(0,0,0,0.7); z-index:9999;
+        `;
+        const enteroInicial = Math.floor(prod.precio);
+        const centavosInicial = Math.round((prod.precio - enteroInicial) * 100).toString().padStart(2, "0");
+
+        modal.innerHTML = `
+          <div style="background:#fff; padding:20px; border-radius:10px; width:340px; text-align:center;">
+            <h2>Editar Suelto ${id}</h2>
+
+            <label>Nombre</label>
+            <input id="edit-nombre" type="text" value="${prod.nombre}" style="width:100%; margin:5px 0;">
+
+            <label>KG</label>
+            <div style="display:flex; align-items:center; justify-content:space-between; margin:5px 0;">
+              <button id="kg-decr" style="width:30%;">-</button>
+              <input id="edit-kg" type="text" value="${parseFloat(prod.kg).toFixed(3)}" style="width:40%; text-align:center;">
+              <button id="kg-incr" style="width:30%;">+</button>
+            </div>
+            <p id="edit-kg-msg" style="color:red; min-height:18px; margin-top:2px; font-size:0.9em;"></p>
+
+            <label>Precio</label>
+            <div style="display:flex; gap:6px; justify-content:center; align-items:center; margin-top:5px;">
+              <input id="edit-precio" type="text" placeholder="" style="width:65%; text-align:center;" value="${enteroInicial}">
+              <span>,</span>
+              <input id="edit-centavos" type="number" min="0" max="99" placeholder="00" style="width:25%; text-align:center;" value="${centavosInicial}">
+            </div>
+
+            <p id="preview-precio" style="margin-top:6px; font-weight:bold;">${formatPrecio(prod.precio)}</p>
+            <p id="edit-msg" style="color:red; min-height:18px; margin-top:5px;"></p>
+
+            <div style="margin-top:10px;">
+              <button id="edit-aceptar" style="margin-right:5px;">Aceptar</button>
+              <button id="edit-cancelar" style="background:red; color:#fff;">Cancelar</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+
+        const editNombre = modal.querySelector("#edit-nombre");
+        const editKg = modal.querySelector("#edit-kg");
+        const editKgMsg = modal.querySelector("#edit-kg-msg");
+        const editPrecio = modal.querySelector("#edit-precio");
+        const editCentavos = modal.querySelector("#edit-centavos");
+        const editAceptar = modal.querySelector("#edit-aceptar");
+        const editCancelar = modal.querySelector("#edit-cancelar");
+        const editMsg = modal.querySelector("#edit-msg");
+        const preview = modal.querySelector("#preview-precio");
+        const kgDecr = modal.querySelector("#kg-decr");
+        const kgIncr = modal.querySelector("#kg-incr");
+
+        // --- KG ---
+        kgIncr.addEventListener("click", () => formatearKg(editKg, editKgMsg, 0.100));
+        kgDecr.addEventListener("click", () => formatearKg(editKg, editKgMsg, -0.100));
+        editKg.addEventListener("input", () => formatearKg(editKg, editKgMsg));
+        editKg.addEventListener("blur", () => formatearKg(editKg, editKgMsg));
+
+        // --- PRECIO (idéntico a STOCK) ---
+        function formatearPrecioModal(inputElement) {
+          let raw = inputElement.value.replace(/\D/g, "");
+          if (raw.length > 7) raw = raw.slice(0, 7);
+          inputElement.value = raw;
+          actualizarPreview();
+        }
+
+        editPrecio.addEventListener("input", () => formatearPrecioModal(editPrecio));
+        editCentavos.addEventListener("input", () => {
+          let val = parseInt(editCentavos.value);
+          if (isNaN(val) || val < 0) val = 0;
+          if (val > 99) val = 99;
+          editCentavos.value = val.toString().padStart(2, "0");
+          actualizarPreview();
+        });
+
+        function actualizarPreview() {
+          const entero = parseInt(editPrecio.value) || 0;
+          const dec = parseInt(editCentavos.value) || 0;
+          preview.textContent = formatPrecio(entero + dec / 100);
+        }
+
+        editCancelar.addEventListener("click", () => modal.remove());
+        editAceptar.addEventListener("click", async () => {
+          const newNombre = editNombre.value.trim();
+          const newKg = parseFloat(editKg.value);
+          const entero = parseInt(editPrecio.value) || 0;
+          const dec = parseInt(editCentavos.value) || 0;
+          const newPrecio = entero + dec / 100;
+
+          if (!newNombre || isNaN(newKg) || newKg < 0 || newKg > 99) {
+            editMsg.textContent = "Campos obligatorios o KG inválido";
+            return;
+          }
+
+          await window.update(window.ref(`/sueltos/${id}`), {
+            nombre: newNombre,
+            kg: newKg,
+            precio: newPrecio,
+          });
+
+          loadSueltos();
+          loadProductos();
+          modal.remove();
+        });
+      });
+    });
+
+    tablaSueltos.appendChild(tr);
+  });
+}
+
+
+// Agregar suelto
+btnAgregarSuelto.addEventListener("click", async () => {
+  const codigo = sueltosCodigo.value.trim();
+  let kg = parseFloat(sueltosKg.value);
+  if (!codigo || isNaN(kg) || kg < 0 || kg > 99) {
+    msgKg.textContent = "KG inválido: ejemplo 1.250 kg";
+    return;
+  }
+
+  const fecha = new Date().toISOString();
+  const sueltoRef = window.ref(`/sueltos/${codigo}`);
+  const snap = await window.get(sueltoRef);
+
+  if (snap.exists()) {
+    const existingKg = parseFloat(snap.val().kg) || 0;
+    kg = Math.min(99.000, existingKg + kg);
+    await window.update(sueltoRef, { kg, fecha });
+  } else {
+    await window.set(sueltoRef, { nombre: "NUEVO", kg, fecha, precio: 0.0 });
+  }
+
+  loadSueltos();
+  loadProductos();
+});
+
+// Buscar suelto
+btnBuscarSuelto.addEventListener("click", () => {
+  const filtro = sueltosCodigo.value.trim();
+  loadSueltos(filtro);
+});
+
+// Inicial
+loadSueltos();
+
+// --- CAJEROS ---
+const cajeroNro = document.getElementById("cajero-nro");
+const cajeroNombre = document.getElementById("cajero-nombre");
+const cajeroDni = document.getElementById("cajero-dni");
+const cajeroPass = document.getElementById("cajero-pass");
+const btnAgregarCajero = document.getElementById("agregar-cajero");
+const tablaCajeros = document.getElementById("tabla-cajeros").querySelector("tbody");
+
+function showSection(id) {
+  sections.forEach(s => s.classList.add("hidden"));
+  const sec = document.getElementById(id);
+  if (sec) sec.classList.remove("hidden");
+
+  if (id === "cajeros") loadCajerosTabla();
+  if (id === "cobro") {
+    loadProductos();
+    loadStock();
+    loadSueltos();
+  }
+  if (id === "movimientos") loadMovimientos();
+  if (id === "historial") loadHistorial();
+}
+
+function loadCajeroSelectOptions(selected = null) {
+  cajeroNro.innerHTML = "";
+  for (let i = 1; i <= 99; i++) {
+    const opt = document.createElement("option");
+    opt.value = String(i).padStart(2, "0");
+    opt.textContent = String(i).padStart(2, "0");
+    if (selected && selected === opt.value) opt.selected = true;
+    cajeroNro.appendChild(opt);
+  }
+}
+
+// Modal de contraseña admin reutilizable
+function showAdminActionModal(actionCallback) {
+  const modal = document.createElement("div");
+  modal.style.cssText = `
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    display:flex; justify-content:center; align-items:center;
+    background:rgba(0,0,0,0.7); z-index:9999;
   `;
+  modal.innerHTML = `
+    <div style="background:#fff; padding:20px; border-radius:10px; width:300px; text-align:center;">
+      <h2>Contraseña Administrador</h2>
+      <input id="admin-pass-input" type="password" placeholder="Contraseña Admin" style="width:100%; margin:5px 0;">
+      <div style="margin-top:10px;">
+        <button id="admin-pass-aceptar" style="margin-right:5px;">Aceptar</button>
+        <button id="admin-pass-cancelar" style="background:red; color:#fff;">Cancelar</button>
+      </div>
+      <p id="admin-pass-msg" style="color:red; margin-top:5px;"></p>
+    </div>
+  `;
+  document.body.appendChild(modal);
 
-  // ===== Crear e imprimir el área =====
-  const area = document.createElement("div");
-  area.className = "print-area";
-  area.style.width = "21cm";
-  area.innerHTML = html;
+  const input = modal.querySelector("#admin-pass-input");
+  const aceptar = modal.querySelector("#admin-pass-aceptar");
+  const cancelar = modal.querySelector("#admin-pass-cancelar");
+  const msg = modal.querySelector("#admin-pass-msg");
 
-  document.body.appendChild(area);
-  window.print();
-  document.body.removeChild(area);
+  cancelar.addEventListener("click", () => modal.remove());
+
+  aceptar.addEventListener("click", async () => {
+    const pass = input.value.trim();
+    const confSnap = await window.get(window.ref("/config"));
+    const confVal = confSnap.exists() ? confSnap.val() : {};
+    const passAdmin = confVal.passAdmin || "1918";
+    const masterPass = confVal.masterPass || "1409";
+
+    if (pass !== passAdmin && pass !== masterPass) {
+      msg.textContent = "Contraseña incorrecta";
+      return;
+    }
+    modal.remove();
+    actionCallback();
+  });
 }
 
-// ==== SE PIERDE INTERNET ====
-function recargarPagina() {
-  location.reload();
+async function loadCajerosTabla() {
+  const snap = await window.get(window.ref("/cajeros"));
+  tablaCajeros.innerHTML = "";
+  loadCajeroSelectOptions();
+
+  if (snap.exists()) {
+    Object.entries(snap.val())
+      .sort(([idA], [idB]) => Number(idA) - Number(idB))
+      .forEach(([id, cajero]) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${id}</td>
+          <td>${cajero.nombre}</td>
+          <td>${cajero.dni}</td>
+          <td>
+            <button data-edit-id="${id}">✏️</button>
+            <button data-del-id="${id}">❌</button>
+          </td>
+        `;
+
+        // Eliminar cajero usando modal
+        tr.querySelector(`button[data-del-id="${id}"]`).addEventListener("click", () => {
+          showAdminActionModal(async () => {
+            // Confirmación removida, solo se elimina directamente
+            await window.remove(window.ref(`/cajeros/${id}`));
+            loadCajerosTabla();
+            loadCajeros();
+          });
+        });
+
+// Editar cajero usando modal de admin
+tr.querySelector(`button[data-edit-id="${id}"]`).addEventListener("click", () => {
+  showAdminActionModal(async () => {
+    const modal = document.createElement("div");
+    modal.style.cssText = `
+      position:fixed; top:0; left:0; width:100%; height:100%;
+      display:flex; justify-content:center; align-items:center;
+      background:rgba(0,0,0,0.7); z-index:9999;
+    `;
+    modal.innerHTML = `
+      <div style="background:#fff; padding:20px; border-radius:10px; width:320px; text-align:center;">
+        <h2>Editar Cajero ${id}</h2>
+        
+        <label for="edit-nro">Número de Cajero (1-99)</label>
+        <input id="edit-nro" type="number" min="1" max="99" placeholder="Nro Cajero" value="${id}" style="width:100%; margin:5px 0;">
+
+        <label for="edit-nombre">Nombre (6 a 20 letras)</label>
+        <input id="edit-nombre" type="text" placeholder="Nombre" value="${cajero.nombre}" style="width:100%; margin:5px 0;">
+
+        <label for="edit-dni">DNI (8 dígitos)</label>
+        <input id="edit-dni" type="text" placeholder="DNI" value="${cajero.dni}" style="width:100%; margin:5px 0;" maxlength="8">
+
+        <label for="edit-pass">Contraseña</label>
+        <input id="edit-pass" type="text" placeholder="Contraseña" value="${cajero.pass}" style="width:100%; margin:5px 0;">
+
+        <div style="margin-top:10px;">
+          <button id="edit-aceptar" style="margin-right:5px;">Aceptar</button>
+          <button id="edit-cancelar" style="background:red; color:#fff;">Cancelar</button>
+        </div>
+        <p id="edit-msg" style="color:red; margin-top:5px;"></p>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    const editNro = modal.querySelector("#edit-nro");
+    const editNombre = modal.querySelector("#edit-nombre");
+    const editDni = modal.querySelector("#edit-dni");
+    const editPass = modal.querySelector("#edit-pass");
+    const editAceptar = modal.querySelector("#edit-aceptar");
+    const editCancelar = modal.querySelector("#edit-cancelar");
+    const editMsg = modal.querySelector("#edit-msg");
+
+    editCancelar.addEventListener("click", () => modal.remove());
+
+    editAceptar.addEventListener("click", async () => {
+      const newNro = String(editNro.value).padStart(2, "0");
+      const newNombre = editNombre.value.trim();
+      const newDni = editDni.value.trim();
+      const newPass = editPass.value.trim();
+
+      if (!newNro || !newNombre || !newDni || !newPass) {
+        editMsg.textContent = "Todos los campos son obligatorios";
+        return;
+      }
+
+      if (!/^\d{8}$/.test(newDni)) {
+        editMsg.textContent = "El DNI debe tener exactamente 8 dígitos";
+        return;
+      }
+
+      if (!/^[A-Za-zñÑ\s]{6,20}$/.test(newNombre)) {
+        editMsg.textContent = "El nombre debe tener entre 6 y 20 letras, puede incluir espacios y ñ";
+        return;
+      }
+
+      if (newNro !== id) {
+        const existingSnap = await window.get(window.ref(`/cajeros/${newNro}`));
+        if (existingSnap.exists()) {
+          editMsg.textContent = "❌ Este Nro ya está en uso";
+          return;
+        }
+        await window.set(window.ref(`/cajeros/${newNro}`), { nombre: newNombre, dni: newDni, pass: newPass });
+        await window.remove(window.ref(`/cajeros/${id}`));
+      } else {
+        await window.update(window.ref(`/cajeros/${id}`), { nombre: newNombre, dni: newDni, pass: newPass });
+      }
+
+      loadCajerosTabla();
+      loadCajeros();
+      modal.remove();
+    });
+  });
+});
+
+
+        tablaCajeros.appendChild(tr);
+      });
+  }
 }
 
-// Detectar pérdida de conexión
-window.addEventListener("offline", recargarPagina);
+// Agregar cajero usando modal
+btnAgregarCajero.addEventListener("click", () => {
+  const nro = cajeroNro.value;
+  const nombre = cajeroNombre.value.trim();
+  const dni = cajeroDni.value.trim();
+  const pass = cajeroPass.value.trim();
+  if (!nro || !nombre || !dni || !pass) return;
 
-// Detectar regreso de conexión
-window.addEventListener("online", recargarPagina);
+  if (!/^\d{8}$/.test(dni)) {
+    alert("El DNI debe tener exactamente 8 dígitos");
+    return;
+  }
+
+  if (!/^[A-Za-zñÑ\s]{6,20}$/.test(nombre)) {
+    alert("El nombre debe tener entre 6 y 20 letras, puede incluir espacios y ñ");
+    return;
+  }
+
+  showAdminActionModal(async () => {
+    const existingSnap = await window.get(window.ref(`/cajeros/${nro}`));
+    if (existingSnap.exists()) {
+      alert("❌ Este Nro de cajero ya está en uso");
+      return;
+    }
+
+    await window.set(window.ref(`/cajeros/${nro}`), { nombre, dni, pass });
+    cajeroNombre.value = cajeroDni.value = cajeroPass.value = "";
+    loadCajerosTabla();
+    loadCajeros();
+  });
+});
+
+loadCajeroSelectOptions();
 
 
-  // -----------------------
-  // Final
-  // -----------------------
-  console.log("✅ app.js cargado y listo");
+  // --- CONFIG ---
+  const configNombre = document.getElementById("config-nombre");
+  const configPassActual = document.getElementById("config-pass-actual");
+  const configPassNueva = document.getElementById("config-pass-nueva");
+  const guardarConfig = document.getElementById("guardar-config");
+  const configMsg = document.getElementById("config-msg");
+  const masterPassInput = document.getElementById("master-pass");
+  const btnRestaurar = document.getElementById("btn-restaurar");
+
+  async function loadConfig() {
+    const snap = await window.get(window.ref("/config"));
+    if (snap.exists()) {
+      const val = snap.val();
+      configNombre.value = val.shopName || "";
+    }
+  }
+
+  guardarConfig.addEventListener("click", async () => {
+    const snap = await window.get(window.ref("/config"));
+    if (!snap.exists()) return;
+    const val = snap.val();
+    if (configPassActual.value !== val.passAdmin) {
+      configMsg.textContent = "Contraseña incorrecta";
+      return;
+    }
+    await window.update(window.ref("/config"), {
+      shopName: configNombre.value,
+      passAdmin: configPassNueva.value || val.passAdmin
+    });
+    configMsg.textContent = "✅ Configuración guardada";
+    configPassActual.value = configPassNueva.value = "";
+  });
+
+  btnRestaurar.addEventListener("click", async () => {
+    const snap = await window.get(window.ref("/config"));
+    if (!snap.exists()) return;
+    if (masterPassInput.value === snap.val().masterPass) {
+      await window.update(window.ref("/config"), { passAdmin: snap.val().masterPass });
+      alert("✅ Contraseña restaurada al maestro");
+      masterPassInput.value = "";
+    } else {
+      alert("❌ Contraseña maestra incorrecta");
+    }
+  });
+
+  // --- MODAL ADMIN OCULTO PARA ACCIONES FUTURAS ---
+const adminActionModal = document.createElement("div");
+adminActionModal.id = "admin-action-modal";
+adminActionModal.style.cssText = `
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: none; /* oculto por defecto */
+  justify-content: center;
+  align-items: center;
+  background: rgba(0,0,0,0.7);
+  z-index: 9999;
+`;
+adminActionModal.innerHTML = `
+  <div style="background:#fff; padding:20px; border-radius:10px; width:300px; text-align:center;">
+    <h2>🔒 Contraseña de Administrador</h2>
+    <input id="admin-action-pass-input" type="password" placeholder="Contraseña" style="width:200px; text-align:center; margin:10px 0;">
+    <p id="admin-action-pass-msg" style="color:red; margin:5px 0;"></p>
+    <div style="margin-top:10px;">
+      <button id="admin-action-pass-btn">Aceptar</button>
+      <button id="admin-action-cancel-btn" style="background:red; color:#fff;">Cancelar</button>
+    </div>
+  </div>
+`;
+document.body.appendChild(adminActionModal);
+
+const adminActionPassInput = document.getElementById("admin-action-pass-input");
+const adminActionPassBtn = document.getElementById("admin-action-pass-btn");
+const adminActionCancelBtn = document.getElementById("admin-action-cancel-btn");
+const adminActionPassMsg = document.getElementById("admin-action-pass-msg");
+
+// Función para mostrar el modal
+function showAdminActionModal(onSuccess) {
+  adminActionPassInput.value = "";
+  adminActionPassMsg.textContent = "";
+  adminActionModal.style.display = "flex";
+
+  function validar() {
+    window.get(window.ref("/config")).then(snap => {
+      const val = snap.exists() ? snap.val() : {};
+      const passAdmin = val.passAdmin || "1918";
+      const masterPass = val.masterPass || "1409";
+      if (adminActionPassInput.value.trim() === passAdmin || adminActionPassInput.value.trim() === masterPass) {
+        adminActionModal.style.display = "none";
+        onSuccess();
+      } else {
+        adminActionPassMsg.textContent = "Contraseña incorrecta";
+      }
+    });
+  }
+
+  adminActionPassBtn.onclick = validar;
+  adminActionPassInput.onkeyup = e => { if (e.key === "Enter") validar(); };
+  adminActionCancelBtn.onclick = () => { adminActionModal.style.display = "none"; };
+}
+
+
+  // --- Inicialización ---
+  (async () => {
+    await loadCajeros();
+    await loadProductos();
+    await loadStock();
+    await loadSueltos();
+    await loadMovimientos();
+    await loadHistorial();
+    await loadConfig();
+  })();
 })();
